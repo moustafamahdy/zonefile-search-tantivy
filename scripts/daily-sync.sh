@@ -1,46 +1,48 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-# Daily sync script for zonefile-search-tantivy
-# Run via cron to update index with daily changes
+# Configuration
+APP_DIR="${APP_DIR:-/opt/zonefile-search}"
+LOG_FILE="${LOG_FILE:-/var/log/domain-sync.log}"
+LOCK_FILE="/tmp/domain-sync.lock"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
-LOG_DIR="${LOG_DIR:-/var/log/zonefile-search}"
-DATE=$(date +%Y-%m-%d)
-
-# Ensure log directory exists
-mkdir -p "${LOG_DIR}"
-
-LOG_FILE="${LOG_DIR}/daily-sync-${DATE}.log"
-
-# Log function
+# Logging function
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-log "=== Starting Daily Sync ==="
+# Check for lock file
+if [ -f "$LOCK_FILE" ]; then
+    log "ERROR: Sync already running (lock file exists)"
+    exit 1
+fi
+
+# Create lock file
+trap "rm -f $LOCK_FILE" EXIT
+touch "$LOCK_FILE"
+
+log "Starting daily sync..."
 
 # Load environment
-if [ -f "${PROJECT_DIR}/.env" ]; then
-    export $(grep -v '^#' "${PROJECT_DIR}/.env" | xargs)
+cd "$APP_DIR"
+if [ -f .env ]; then
+    source .env
 fi
 
-# Run the indexer
-log "Running domain-indexer daily update..."
-"${PROJECT_DIR}/target/release/domain-indexer" daily --download 2>&1 | tee -a "${LOG_FILE}"
+# Run daily sync
+log "Downloading and applying updates..."
+./target/release/domain-indexer daily --download --index "${INDEX_PATH:-./data/index}" 2>&1 | tee -a "$LOG_FILE"
 
-RESULT=$?
-
-if [ ${RESULT} -eq 0 ]; then
-    log "Daily sync completed successfully"
-else
-    log "ERROR: Daily sync failed with exit code ${RESULT}"
+# Reload API to pick up changes (graceful)
+log "Reloading API service..."
+if command -v systemctl &> /dev/null; then
+    sudo systemctl reload domain-api 2>/dev/null || sudo systemctl restart domain-api 2>/dev/null || true
 fi
 
-# Clean up old logs (keep last 30 days)
-find "${LOG_DIR}" -name "daily-sync-*.log" -mtime +30 -delete 2>/dev/null || true
+# Clear Redis cache for fresh results
+log "Clearing Redis cache..."
+if command -v redis-cli &> /dev/null; then
+    redis-cli FLUSHDB 2>/dev/null || true
+fi
 
-log "=== Daily Sync Finished ==="
-
-exit ${RESULT}
+log "Daily sync completed successfully"

@@ -144,7 +144,7 @@ impl ZonefileDownloader {
         Ok(())
     }
 
-    /// Extract domains.txt from a ZIP file
+    /// Extract domains file from a ZIP file (supports domains.txt or any .txt file)
     async fn extract_domains_txt(&self, zip_path: &Path, output_path: &Path) -> Result<()> {
         use async_zip::tokio::read::fs::ZipFileReader;
         use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -153,23 +153,30 @@ impl ZonefileDownloader {
             .await
             .map_err(|e| Error::Zip(e.to_string()))?;
 
-        // Find domains.txt in the archive
+        // Find domains file in the archive (domains.txt or any .txt file)
         let entries = reader.file().entries();
         let mut domains_idx = None;
+        let mut fallback_idx = None;
 
         for (idx, entry) in entries.iter().enumerate() {
             let filename = entry
                 .filename()
                 .as_str()
                 .map_err(|e| Error::Zip(e.to_string()))?;
+
+            // First priority: domains.txt
             if filename == "domains.txt" || filename.ends_with("/domains.txt") {
                 domains_idx = Some(idx);
                 break;
             }
+            // Fallback: any .txt file (for daily updates which may have different names)
+            if filename.ends_with(".txt") && fallback_idx.is_none() {
+                fallback_idx = Some(idx);
+            }
         }
 
-        let idx = domains_idx.ok_or_else(|| {
-            Error::InvalidZonefile("domains.txt not found in archive".to_string())
+        let idx = domains_idx.or(fallback_idx).ok_or_else(|| {
+            Error::InvalidZonefile("No .txt file found in archive".to_string())
         })?;
 
         // Extract the file

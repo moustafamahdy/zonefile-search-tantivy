@@ -1,6 +1,22 @@
 # Zonefile Search Tantivy
 
-High-performance domain search engine built with Rust and Tantivy. Indexes 300M+ domains with sub-50ms search latency.
+High-performance domain search engine built with Rust and Tantivy. Indexes 311M+ domains with sub-millisecond cached search and 11,000+ requests per second throughput.
+
+## Technologies
+
+| Category | Technology | Purpose |
+|----------|------------|---------|
+| **Language** | Rust 1.83 | Systems programming, memory safety, performance |
+| **Search Engine** | [Tantivy](https://github.com/quickwit-oss/tantivy) | Full-text search, BM25 ranking, inverted index |
+| **Web Framework** | [Axum](https://github.com/tokio-rs/axum) | Async HTTP API server |
+| **Async Runtime** | [Tokio](https://tokio.rs) | Async I/O, task scheduling |
+| **Caching** | [Redis](https://redis.io) | Query result caching (24h TTL) |
+| **Serialization** | [Serde](https://serde.rs) + JSON | API request/response handling |
+| **HTTP Client** | [Reqwest](https://github.com/seanmonstar/reqwest) | External API calls |
+| **CLI** | [Clap](https://github.com/clap-rs/clap) | Command-line argument parsing |
+| **Logging** | [Tracing](https://github.com/tokio-rs/tracing) | Structured logging |
+| **Compression** | [async-zip](https://github.com/Majored/rs-async-zip) | Zonefile archive extraction |
+| **Containerization** | Docker + Docker Compose | Deployment orchestration |
 
 ## Features
 
@@ -187,13 +203,34 @@ sudo systemctl start domain-api
 
 ## Performance
 
+### Benchmarks (311M domains, Apple M2 Pro)
+
 | Metric | Value |
 |--------|-------|
-| Index size | ~20-30GB (314M domains) |
-| Search latency | <50ms (hot), <200ms (cold) |
-| Exact lookup | <5ms |
-| Full indexing | ~1-2 hours (depends on API) |
-| Daily sync | ~5-10 minutes |
+| **Index size** | 21.09 GB |
+| **Documents indexed** | 311,770,911 |
+| **Throughput (cached)** | 11,461 req/sec |
+| **Throughput (uncached)** | 304-971 req/sec |
+| **Search latency (cached)** | 0.14ms |
+| **Search latency (uncached)** | 20-350ms |
+| **Exact lookup** | <1ms |
+| **Full indexing time** | ~3.5 hours |
+| **Daily sync time** | ~3 minutes |
+
+### Resource Usage
+
+| Resource | Idle | Under Load |
+|----------|------|------------|
+| **Memory (RSS)** | 268 MB | 411 MB |
+| **CPU** | 0% | 14% peak |
+
+### Server Requirements
+
+| Tier | CPU | RAM | Storage | Expected RPS |
+|------|-----|-----|---------|--------------|
+| Minimum | 2 cores | 2 GB | 25 GB SSD | 1,000+ |
+| Recommended | 4 cores | 4 GB | 50 GB SSD | 10,000+ |
+| Production | 8 cores | 8 GB | 100 GB SSD | 20,000+ |
 
 ## Configuration
 
