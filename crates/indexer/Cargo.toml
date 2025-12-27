@@ -1,0 +1,25 @@
+[package]
+name = "indexer"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "domain-indexer"
+path = "src/main.rs"
+
+[dependencies]
+domain-core = { path = "../domain-core" }
+word-client = { path = "../word-client" }
+zonefile-client = { path = "../zonefile-client" }
+tantivy = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+indicatif = { workspace = true }

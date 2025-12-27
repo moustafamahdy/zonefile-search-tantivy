@@ -1,0 +1,46 @@
+services:
+  api:
+    build: .
+    container_name: domain-search-api
+    ports:
+      - "3001:3000"
+    environment:
+      - RUST_LOG=info
+      - INDEX_PATH=/data/index
+      - REDIS_URL=redis://redis:6379
+      - API_PORT=3000
+      - WORD_SPLITTER_URL=${WORD_SPLITTER_URL}
+      - WORD_SPLITTER_USER=${WORD_SPLITTER_USER}
+      - WORD_SPLITTER_PASS=${WORD_SPLITTER_PASS}
+    volumes:
+      - ./data/index:/data/index:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  redis:
+    image: redis:7-alpine
+    container_name: domain-search-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  redis_data:

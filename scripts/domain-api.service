@@ -1,0 +1,30 @@
+[Unit]
+Description=Domain Search API (Tantivy)
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/zonefile-search-tantivy
+ExecStart=/opt/zonefile-search-tantivy/domain-api
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=RUST_LOG=info
+EnvironmentFile=/opt/zonefile-search-tantivy/.env
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=4G
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/data/index
+
+[Install]
+WantedBy=multi-user.target

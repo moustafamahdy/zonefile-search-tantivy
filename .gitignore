@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Data files
+/data/
+*.txt
+*.zip
+
+# Logs
+*.log
+resource-usage.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Redis
+dump.rdb
