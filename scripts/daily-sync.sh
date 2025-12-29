@@ -33,11 +33,7 @@ fi
 log "Downloading and applying updates..."
 ./target/release/domain-indexer daily --download --index "${INDEX_PATH:-./data/index}" 2>&1 | tee -a "$LOG_FILE"
 
-# Reload API to pick up changes (graceful)
-log "Reloading API service..."
-if command -v systemctl &> /dev/null; then
-    sudo systemctl reload domain-api 2>/dev/null || sudo systemctl restart domain-api 2>/dev/null || true
-fi
+# Note: API auto-reloads via Tantivy's file watcher (no restart needed)
 
 # Clear Redis cache for fresh results
 log "Clearing Redis cache..."
