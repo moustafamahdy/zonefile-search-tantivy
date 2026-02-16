@@ -5,7 +5,7 @@ set -e
 APP_DIR="${APP_DIR:-/root/zonefile-search-tantivy}"
 LOG_FILE="${LOG_FILE:-/var/log/domain-sync.log}"
 LOCK_FILE="/tmp/domain-sync.lock"
-REDIS_PASSWORD="qVr1qyxXoYIxY8GYpWF88YaZ8qxnsKUw"
+REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 
 # Logging function
 log() {

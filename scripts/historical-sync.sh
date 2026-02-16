@@ -14,6 +14,9 @@ set -e
 #   ./historical-sync.sh 2025-01-01 2025-01-02 2025-01-03
 #   ./historical-sync.sh --range 2025-01-01 2025-01-04
 
+# Configuration
+REDIS_PASSWORD="${REDIS_PASSWORD:-}"
+
 APP_DIR="${APP_DIR:-/root/zonefile-search-tantivy}"
 LOG_FILE="${LOG_FILE:-/var/log/domain-sync.log}"
 DOWNLOAD_DIR="/tmp/zonefile-historical"
@@ -207,7 +210,7 @@ done
 # Clear Redis cache
 log "Clearing Redis cache..."
 if command -v redis-cli &> /dev/null; then
-    redis-cli -a "qVr1qyxXoYIxY8GYpWF88YaZ8qxnsKUw" FLUSHDB 2>/dev/null || true
+    redis-cli -a "$REDIS_PASSWORD" FLUSHDB 2>/dev/null || true
 fi
 
 log "=========================================="

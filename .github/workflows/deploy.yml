@@ -1,0 +1,202 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "zonefile-test"
+          cache-on-failure: false
+
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+  build:
+    name: Build Release Binaries
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "zonefile-build"
+          cache-on-failure: false
+
+      - name: Build release binaries
+        run: cargo build --release --locked
+
+      - name: Strip binaries
+        run: |
+          strip target/release/domain-api
+          strip target/release/domain-indexer
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries-${{ github.sha }}
+          path: |
+            target/release/domain-api
+            target/release/domain-indexer
+          retention-days: 7
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build]
+    environment: production
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries-${{ github.sha }}
+          path: ./binaries
+
+      - name: Make binaries executable
+        run: chmod +x ./binaries/*
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create backup
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -p ${{ secrets.SSH_PORT || 22 }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} '
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            mkdir -p ${{ secrets.DEPLOYMENT_PATH }}/backups
+            if [ -f ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-api ]; then
+              cp ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-api \
+                 ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-api.$TIMESTAMP
+              cp ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-indexer \
+                 ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-indexer.$TIMESTAMP
+              echo $TIMESTAMP > ${{ secrets.DEPLOYMENT_PATH }}/backups/latest
+              cd ${{ secrets.DEPLOYMENT_PATH }}/backups
+              ls -t domain-api.* 2>/dev/null | tail -n +6 | xargs -r rm
+              ls -t domain-indexer.* 2>/dev/null | tail -n +6 | xargs -r rm
+            fi
+          '
+
+      - name: Deploy binaries
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            -P ${{ secrets.SSH_PORT || 22 }} \
+            ./binaries/domain-api ./binaries/domain-indexer \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOYMENT_PATH }}/target/release/
+
+      - name: Restart PM2 service
+        id: restart
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -p ${{ secrets.SSH_PORT || 22 }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            "cd ${{ secrets.DEPLOYMENT_PATH }} && pm2 restart zonefile-api --update-env"
+
+      - name: Health check with retry
+        id: health_check
+        run: |
+          MAX_ATTEMPTS=10
+          ATTEMPT=1
+          WAIT_TIME=2
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS..."
+
+            HEALTH_STATUS=$(ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.SSH_PORT || 22 }} \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "curl -sf http://localhost:3003/health" || echo "failed")
+
+            if echo "$HEALTH_STATUS" | grep -q '"status":"ok"'; then
+              echo "✓ Deployment successful! API is healthy."
+              DOC_COUNT=$(echo "$HEALTH_STATUS" | jq -r '.index_documents' 2>/dev/null || echo "0")
+              echo "Index documents: $DOC_COUNT"
+
+              if [ "$DOC_COUNT" -gt 0 ]; then
+                echo "✓ Index loaded successfully"
+                exit 0
+              else
+                echo "⚠ Warning: Index appears empty"
+                exit 1
+              fi
+            fi
+
+            echo "Health check failed, waiting ${WAIT_TIME}s..."
+            sleep $WAIT_TIME
+            WAIT_TIME=$((WAIT_TIME * 2))
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          echo "✗ Deployment failed: Health checks did not pass"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure() && steps.restart.conclusion == 'success'
+        run: |
+          echo "🔄 Initiating rollback..."
+
+          LAST_BACKUP=$(ssh -i ~/.ssh/deploy_key \
+            -p ${{ secrets.SSH_PORT || 22 }} \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            "cat ${{ secrets.DEPLOYMENT_PATH }}/backups/latest 2>/dev/null || echo 'none'")
+
+          if [ "$LAST_BACKUP" != "none" ]; then
+            ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.SSH_PORT || 22 }} \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "cp ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-api.$LAST_BACKUP \
+                  ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-api && \
+               cp ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-indexer.$LAST_BACKUP \
+                  ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-indexer && \
+               pm2 restart zonefile-api"
+
+            sleep 5
+
+            ROLLBACK_HEALTH=$(ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.SSH_PORT || 22 }} \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "curl -sf http://localhost:3003/health")
+
+            if echo "$ROLLBACK_HEALTH" | grep -q '"status":"ok"'; then
+              echo "✓ Rollback successful"
+            else
+              echo "✗ CRITICAL: Rollback failed! Manual intervention required."
+              exit 1
+            fi
+          else
+            echo "⚠ No backup available for rollback"
+            exit 1
+          fi
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "::notice::Deployment completed successfully at $(date)"
+          echo "::notice::Commit: ${{ github.sha }}"
+          echo "::notice::Author: ${{ github.actor }}"
