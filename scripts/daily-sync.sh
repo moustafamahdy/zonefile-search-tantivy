@@ -2,9 +2,10 @@
 set -e
 
 # Configuration
-APP_DIR="${APP_DIR:-/opt/zonefile-search}"
+APP_DIR="${APP_DIR:-/root/zonefile-search-tantivy}"
 LOG_FILE="${LOG_FILE:-/var/log/domain-sync.log}"
 LOCK_FILE="/tmp/domain-sync.lock"
+REDIS_PASSWORD="qVr1qyxXoYIxY8GYpWF88YaZ8qxnsKUw"
 
 # Logging function
 log() {
@@ -38,7 +39,7 @@ log "Downloading and applying updates..."
 # Clear Redis cache for fresh results
 log "Clearing Redis cache..."
 if command -v redis-cli &> /dev/null; then
-    redis-cli FLUSHDB 2>/dev/null || true
+    redis-cli -a "$REDIS_PASSWORD" FLUSHDB 2>/dev/null || true
 fi
 
 log "Daily sync completed successfully"

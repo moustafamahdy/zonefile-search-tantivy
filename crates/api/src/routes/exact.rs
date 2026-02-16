@@ -6,6 +6,7 @@ use axum::{
 };
 use domain_core::Domain;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::TermQuery;
@@ -33,6 +34,20 @@ pub struct DomainResult {
     pub length: u64,
     pub has_hyphen: bool,
     pub tokens: Vec<String>,
+}
+
+// Bulk exact lookup types
+#[derive(Deserialize)]
+pub struct BulkExactRequest {
+    pub domains: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct BulkExactResponse {
+    pub results: HashMap<String, bool>,
+    pub found_count: usize,
+    pub not_found_count: usize,
+    pub query_time_ms: f64,
 }
 
 /// Exact domain lookup
@@ -84,6 +99,76 @@ pub async fn exact_lookup(
             query_time_ms,
         }))
     }
+}
+
+/// Bulk exact domain lookup - check multiple domains at once
+pub async fn bulk_exact_lookup(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BulkExactRequest>,
+) -> Result<Json<BulkExactResponse>, (StatusCode, String)> {
+    let start = std::time::Instant::now();
+
+    // Limit to 1000 domains per request to prevent abuse
+    if payload.domains.len() > 1000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Maximum 1000 domains per request".to_string(),
+        ));
+    }
+
+    let reader = state.index.reader().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Index error: {}", e))
+    })?;
+    let searcher = reader.searcher();
+
+    let mut results: HashMap<String, bool> = HashMap::new();
+    let mut found_count = 0;
+    let mut not_found_count = 0;
+
+    for domain_str in &payload.domains {
+        // Normalize the input domain
+        let domain = Domain::new(domain_str);
+        let normalized = match domain.normalize() {
+            Ok(n) => n,
+            Err(_) => {
+                // Invalid domain, mark as not found
+                results.insert(domain_str.to_lowercase(), false);
+                not_found_count += 1;
+                continue;
+            }
+        };
+
+        // Search for exact match
+        let term = Term::from_field_text(state.schema.domain_exact, &normalized.domain_exact);
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+
+        let top_docs = match searcher.search(&query, &TopDocs::with_limit(1)) {
+            Ok(docs) => docs,
+            Err(_) => {
+                results.insert(domain_str.to_lowercase(), false);
+                not_found_count += 1;
+                continue;
+            }
+        };
+
+        let found = !top_docs.is_empty();
+        results.insert(domain_str.to_lowercase(), found);
+
+        if found {
+            found_count += 1;
+        } else {
+            not_found_count += 1;
+        }
+    }
+
+    let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(Json(BulkExactResponse {
+        results,
+        found_count,
+        not_found_count,
+        query_time_ms,
+    }))
 }
 
 /// Extract domain result from a Tantivy document

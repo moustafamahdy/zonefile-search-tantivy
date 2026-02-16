@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         .route("/health", get(routes::health::health))
         .route("/stats", get(routes::health::stats))
         .route("/exact", get(routes::exact::exact_lookup))
+        .route("/exact/bulk", post(routes::exact::bulk_exact_lookup))
         .route("/search", get(routes::search::search))
         .route("/search/bulk", post(routes::search::bulk_search))
         .layer(CorsLayer::permissive())

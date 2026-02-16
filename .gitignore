@@ -21,6 +21,7 @@
 # Logs
 *.log
 resource-usage.log
+/logs/
 
 # OS
 .DS_Store
