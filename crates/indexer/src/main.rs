@@ -21,7 +21,7 @@ struct Cli {
 enum Commands {
     /// Build a full index from a zonefile
     Full {
-        /// Path to the input zonefile (domains.txt)
+        /// Path to the input zonefile (domains.txt or detailed CSV)
         #[arg(short, long)]
         input: Option<PathBuf>,
 
@@ -40,6 +40,10 @@ enum Commands {
         /// Commit interval (number of documents)
         #[arg(long, default_value = "1000000")]
         commit_interval: usize,
+
+        /// Use detailed zonefile format (CSV with IP, country, web server, etc.)
+        #[arg(long)]
+        detailed: bool,
     },
 
     /// Apply daily incremental updates (adds and deletes)
@@ -59,6 +63,10 @@ enum Commands {
         /// Path to the existing index directory
         #[arg(short, long)]
         index: Option<PathBuf>,
+
+        /// Use detailed zonefile format for additions (CSV with metadata)
+        #[arg(long)]
+        detailed: bool,
     },
 
     /// Show index statistics
@@ -96,19 +104,30 @@ async fn main() -> Result<()> {
             output,
             heap_gb,
             commit_interval,
+            detailed,
         } => {
             let output_path = output.unwrap_or_else(|| config.index_path.clone());
             let heap_size = heap_gb * 1024 * 1024 * 1024;
 
             if download {
-                info!("Downloading full zonefile from API...");
-                full::run_with_download(&config, &output_path, heap_size, commit_interval).await?;
+                let mode = if detailed { "detailed" } else { "plain" };
+                info!(mode = mode, "Downloading full zonefile from API...");
+                full::run_with_download(&config, &output_path, heap_size, commit_interval, detailed)
+                    .await?;
             } else {
                 let input_path = input.ok_or_else(|| {
                     anyhow::anyhow!("--input is required when not using --download")
                 })?;
-                info!(input = ?input_path, output = ?output_path, "Building full index");
-                full::run(&config, &input_path, &output_path, heap_size, commit_interval).await?;
+                info!(input = ?input_path, output = ?output_path, detailed = detailed, "Building full index");
+                full::run(
+                    &config,
+                    &input_path,
+                    &output_path,
+                    heap_size,
+                    commit_interval,
+                    detailed,
+                )
+                .await?;
             }
         }
 
@@ -117,15 +136,17 @@ async fn main() -> Result<()> {
             removes,
             download,
             index,
+            detailed,
         } => {
             let index_path = index.unwrap_or_else(|| config.index_path.clone());
 
             if download {
-                info!("Downloading daily updates from API...");
-                daily::run_with_download(&config, &index_path).await?;
+                let mode = if detailed { "detailed" } else { "plain" };
+                info!(mode = mode, "Downloading daily updates from API...");
+                daily::run_with_download(&config, &index_path, detailed).await?;
             } else {
-                info!(index = ?index_path, "Applying daily updates");
-                daily::run(&config, adds, removes, &index_path).await?;
+                info!(index = ?index_path, detailed = detailed, "Applying daily updates");
+                daily::run(&config, adds, removes, &index_path, detailed).await?;
             }
         }
 
@@ -144,10 +165,8 @@ async fn main() -> Result<()> {
 }
 
 fn show_stats(index_path: &PathBuf) -> Result<()> {
-    use domain_core::DomainSchema;
     use tantivy::Index;
 
-    let schema = DomainSchema::new();
     let index = Index::open_in_dir(index_path)?;
     let reader = index.reader()?;
     let searcher = reader.searcher();

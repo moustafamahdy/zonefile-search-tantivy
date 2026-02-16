@@ -46,7 +46,7 @@ impl Config {
 
         Ok(Self {
             word_splitter_url: env::var("WORD_SPLITTER_URL")
-                .unwrap_or_else(|_| "https://moustafamahdy.xyz/word-splitter-api".to_string()),
+                .unwrap_or_else(|_| "https://moustafa.store/word-splitter-api".to_string()),
 
             word_splitter_user: env::var("WORD_SPLITTER_USER")
                 .map_err(|_| Error::Config("WORD_SPLITTER_USER not set".to_string()))?,

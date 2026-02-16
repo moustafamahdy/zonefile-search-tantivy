@@ -11,21 +11,47 @@ use tracing::{debug, info};
 /// Type of zonefile to download
 #[derive(Debug, Clone, Copy)]
 pub enum ZonefileType {
-    /// Full zonefile (all domains)
+    /// Full zonefile (all domains, plain list)
     Full,
-    /// Daily added domains
+    /// Daily added domains (plain list)
     DailyUpdate,
-    /// Daily removed domains
+    /// Daily removed domains (plain list)
     DailyRemove,
+    /// Full detailed zonefile (CSV with metadata)
+    DetailedFull,
+    /// Daily added domains with detailed metadata (CSV)
+    DetailedDailyUpdate,
 }
 
 impl ZonefileType {
+    /// Short label for logging and temp file naming
     fn endpoint(&self) -> &'static str {
         match self {
             ZonefileType::Full => "full",
             ZonefileType::DailyUpdate => "dailyupdate",
             ZonefileType::DailyRemove => "dailyremove",
+            ZonefileType::DetailedFull => "detailed-full",
+            ZonefileType::DetailedDailyUpdate => "detailed-update",
         }
+    }
+
+    /// URL path segment for the API request
+    fn url_path(&self) -> &'static str {
+        match self {
+            ZonefileType::Full => "get/full/list/zip",
+            ZonefileType::DailyUpdate => "get/dailyupdate/list/zip",
+            ZonefileType::DailyRemove => "get/dailyremove/list/zip",
+            ZonefileType::DetailedFull => "get-detailed/full/list/zip",
+            ZonefileType::DetailedDailyUpdate => "get-detailed/full-update/list/zip",
+        }
+    }
+
+    /// Whether this is a detailed (CSV) zonefile type
+    pub fn is_detailed(&self) -> bool {
+        matches!(
+            self,
+            ZonefileType::DetailedFull | ZonefileType::DetailedDailyUpdate
+        )
     }
 }
 
@@ -67,12 +93,12 @@ impl ZonefileDownloader {
 
     /// Download a zonefile and return the path to the extracted file
     ///
-    /// Downloads a ZIP file from the API, extracts domains.txt, and returns its path.
+    /// Downloads a ZIP file from the API, extracts the data file, and returns its path.
     pub async fn download(&self, zonefile_type: ZonefileType) -> Result<PathBuf> {
         let endpoint = zonefile_type.endpoint();
         let url = format!(
-            "{}/{}/get/{}/list/zip",
-            self.base_url, self.token, endpoint
+            "{}/{}/{}",
+            self.base_url, self.token, zonefile_type.url_path()
         );
 
         info!(endpoint = endpoint, "Downloading zonefile");
@@ -81,9 +107,15 @@ impl ZonefileDownloader {
         let zip_path = self.download_dir.join(format!("{}.zip", endpoint));
         self.download_file(&url, &zip_path).await?;
 
-        // Extract domains.txt from ZIP
-        let extracted_path = self.download_dir.join(format!("{}.txt", endpoint));
-        self.extract_domains_txt(&zip_path, &extracted_path).await?;
+        // Extract data file from ZIP
+        let ext = if zonefile_type.is_detailed() {
+            "csv"
+        } else {
+            "txt"
+        };
+        let extracted_path = self.download_dir.join(format!("{}.{}", endpoint, ext));
+        self.extract_data_file(&zip_path, &extracted_path, zonefile_type)
+            .await?;
 
         // Clean up ZIP file
         if let Err(e) = tokio::fs::remove_file(&zip_path).await {
@@ -144,8 +176,15 @@ impl ZonefileDownloader {
         Ok(())
     }
 
-    /// Extract domains file from a ZIP file (supports domains.txt or any .txt file)
-    async fn extract_domains_txt(&self, zip_path: &Path, output_path: &Path) -> Result<()> {
+    /// Extract data file from a ZIP archive
+    ///
+    /// Supports both .txt files (plain zonefiles) and .csv files (detailed zonefiles).
+    async fn extract_data_file(
+        &self,
+        zip_path: &Path,
+        output_path: &Path,
+        zonefile_type: ZonefileType,
+    ) -> Result<()> {
         use async_zip::tokio::read::fs::ZipFileReader;
         use tokio_util::compat::FuturesAsyncReadCompatExt;
 
@@ -153,10 +192,11 @@ impl ZonefileDownloader {
             .await
             .map_err(|e| Error::Zip(e.to_string()))?;
 
-        // Find domains file in the archive (domains.txt or any .txt file)
+        // Find the data file in the archive
         let entries = reader.file().entries();
-        let mut domains_idx = None;
-        let mut fallback_idx = None;
+        let mut domains_txt_idx = None;
+        let mut csv_fallback_idx = None;
+        let mut txt_fallback_idx = None;
 
         for (idx, entry) in entries.iter().enumerate() {
             let filename = entry
@@ -164,19 +204,41 @@ impl ZonefileDownloader {
                 .as_str()
                 .map_err(|e| Error::Zip(e.to_string()))?;
 
-            // First priority: domains.txt
-            if filename == "domains.txt" || filename.ends_with("/domains.txt") {
-                domains_idx = Some(idx);
-                break;
+            // Skip readme files
+            if filename.to_lowercase().contains("readme") {
+                continue;
             }
-            // Fallback: any .txt file (for daily updates which may have different names)
-            if filename.ends_with(".txt") && fallback_idx.is_none() {
-                fallback_idx = Some(idx);
+
+            // Priority 1: domains.txt (plain mode classic)
+            if filename == "domains.txt" || filename.ends_with("/domains.txt") {
+                domains_txt_idx = Some(idx);
+            }
+
+            // Priority 2: any .csv file (detailed mode)
+            if filename.ends_with(".csv") && csv_fallback_idx.is_none() {
+                csv_fallback_idx = Some(idx);
+            }
+
+            // Priority 3: any .txt file (fallback for daily updates with different names)
+            if filename.ends_with(".txt") && txt_fallback_idx.is_none() {
+                txt_fallback_idx = Some(idx);
             }
         }
 
-        let idx = domains_idx.or(fallback_idx).ok_or_else(|| {
-            Error::InvalidZonefile("No .txt file found in archive".to_string())
+        // Choose the best match based on zonefile type
+        let idx = if zonefile_type.is_detailed() {
+            // For detailed types, prefer CSV files
+            csv_fallback_idx
+                .or(domains_txt_idx)
+                .or(txt_fallback_idx)
+        } else {
+            // For plain types, prefer domains.txt then any .txt
+            domains_txt_idx
+                .or(txt_fallback_idx)
+                .or(csv_fallback_idx)
+        }
+        .ok_or_else(|| {
+            Error::InvalidZonefile("No .txt or .csv file found in archive".to_string())
         })?;
 
         // Extract the file
@@ -194,7 +256,7 @@ impl ZonefileDownloader {
         let size = tokio::fs::metadata(output_path).await?.len();
         info!(
             size_mb = size / 1024 / 1024,
-            "Extracted domains.txt"
+            "Extracted data file"
         );
 
         Ok(())
@@ -204,8 +266,8 @@ impl ZonefileDownloader {
     pub async fn download_to_memory(&self, zonefile_type: ZonefileType) -> Result<Vec<u8>> {
         let endpoint = zonefile_type.endpoint();
         let url = format!(
-            "{}/{}/get/{}/list/zip",
-            self.base_url, self.token, endpoint
+            "{}/{}/{}",
+            self.base_url, self.token, zonefile_type.url_path()
         );
 
         debug!(endpoint = endpoint, "Downloading zonefile to memory");
@@ -234,5 +296,32 @@ mod tests {
         assert_eq!(ZonefileType::Full.endpoint(), "full");
         assert_eq!(ZonefileType::DailyUpdate.endpoint(), "dailyupdate");
         assert_eq!(ZonefileType::DailyRemove.endpoint(), "dailyremove");
+        assert_eq!(ZonefileType::DetailedFull.endpoint(), "detailed-full");
+        assert_eq!(
+            ZonefileType::DetailedDailyUpdate.endpoint(),
+            "detailed-update"
+        );
+    }
+
+    #[test]
+    fn test_zonefile_type_url_path() {
+        assert_eq!(ZonefileType::Full.url_path(), "get/full/list/zip");
+        assert_eq!(
+            ZonefileType::DetailedFull.url_path(),
+            "get-detailed/full/list/zip"
+        );
+        assert_eq!(
+            ZonefileType::DetailedDailyUpdate.url_path(),
+            "get-detailed/full-update/list/zip"
+        );
+    }
+
+    #[test]
+    fn test_zonefile_type_is_detailed() {
+        assert!(!ZonefileType::Full.is_detailed());
+        assert!(!ZonefileType::DailyUpdate.is_detailed());
+        assert!(!ZonefileType::DailyRemove.is_detailed());
+        assert!(ZonefileType::DetailedFull.is_detailed());
+        assert!(ZonefileType::DetailedDailyUpdate.is_detailed());
     }
 }

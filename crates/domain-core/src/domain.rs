@@ -7,6 +7,18 @@ pub struct Domain {
     pub raw: String,
 }
 
+/// Detailed metadata from detailed zonefile CSV
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DetailedRecord {
+    pub dns_servers: String,
+    pub ip: String,
+    pub country: String,
+    pub web_server: String,
+    pub email: String,
+    pub phone: String,
+    pub seo_rank: String,
+}
+
 /// Normalized domain with extracted components
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedDomain {
@@ -27,6 +39,10 @@ pub struct NormalizedDomain {
 
     /// Segmented tokens from word splitter (filled later)
     pub tokens: Vec<String>,
+
+    /// Optional detailed metadata (present when indexing detailed zonefiles)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detailed: Option<DetailedRecord>,
 }
 
 impl Domain {
@@ -97,6 +113,7 @@ impl Domain {
             len,
             has_hyphen,
             tokens: Vec::new(),
+            detailed: None,
         })
     }
 }
@@ -118,6 +135,12 @@ impl NormalizedDomain {
     /// Set tokens from word segmentation
     pub fn with_tokens(mut self, tokens: Vec<String>) -> Self {
         self.tokens = tokens;
+        self
+    }
+
+    /// Attach detailed metadata from a detailed zonefile
+    pub fn with_detailed(mut self, detailed: DetailedRecord) -> Self {
+        self.detailed = Some(detailed);
         self
     }
 }

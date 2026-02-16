@@ -34,6 +34,22 @@ pub struct DomainResult {
     pub length: u64,
     pub has_hyphen: bool,
     pub tokens: Vec<String>,
+
+    // Detailed fields (omitted from JSON when None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_servers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seo_rank: Option<String>,
 }
 
 // Bulk exact lookup types
@@ -220,6 +236,24 @@ pub fn extract_domain_result(
         tokens_str.split_whitespace().map(String::from).collect()
     };
 
+    // Extract optional detailed fields
+    let extract_optional = |field: Option<tantivy::schema::Field>| -> Option<String> {
+        field.and_then(|f| {
+            doc.get_first(f)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+    };
+
+    let ip = extract_optional(schema.ip);
+    let country = extract_optional(schema.country);
+    let dns_servers = extract_optional(schema.dns_servers);
+    let web_server = extract_optional(schema.web_server);
+    let email = extract_optional(schema.email);
+    let phone = extract_optional(schema.phone);
+    let seo_rank = extract_optional(schema.seo_rank);
+
     DomainResult {
         domain,
         label,
@@ -227,5 +261,12 @@ pub fn extract_domain_result(
         length,
         has_hyphen,
         tokens,
+        ip,
+        country,
+        dns_servers,
+        web_server,
+        email,
+        phone,
+        seo_rank,
     }
 }

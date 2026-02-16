@@ -1,12 +1,15 @@
 use crate::progress::IndexProgress;
 use anyhow::Result;
-use domain_core::{domain::should_filter_domain, Config, Domain, DomainSchema};
+use domain_core::{domain::should_filter_domain, Config, DetailedRecord, Domain, DomainSchema};
 use futures::StreamExt;
 use std::path::Path;
 use tantivy::Index;
 use tracing::{debug, info, warn};
 use word_client::WordClient;
-use zonefile_client::{parser::batch_stream, DomainStream, ZonefileDownloader, ZonefileType};
+use zonefile_client::{
+    batch_stream, batch_stream_detailed, DetailedDomainStream, DomainStream, ZonefileDownloader,
+    ZonefileType,
+};
 
 /// Run full indexing with download from API
 pub async fn run_with_download(
@@ -14,17 +17,23 @@ pub async fn run_with_download(
     output_path: &Path,
     heap_size: usize,
     commit_interval: usize,
+    detailed: bool,
 ) -> Result<()> {
-    // Download the zonefile
     let downloader = ZonefileDownloader::new(
         &config.zonefile_api_url,
         &config.zonefile_token,
         std::env::temp_dir().join("zonefile-indexer"),
     )?;
 
-    let input_path = downloader.download(ZonefileType::Full).await?;
+    let zonefile_type = if detailed {
+        ZonefileType::DetailedFull
+    } else {
+        ZonefileType::Full
+    };
 
-    run(config, &input_path, output_path, heap_size, commit_interval).await
+    let input_path = downloader.download(zonefile_type).await?;
+
+    run(config, &input_path, output_path, heap_size, commit_interval, detailed).await
 }
 
 /// Run full indexing from a local file
@@ -34,14 +43,19 @@ pub async fn run(
     output_path: &Path,
     heap_size: usize,
     commit_interval: usize,
+    detailed: bool,
 ) -> Result<()> {
     info!("Starting full index build");
-    info!(input = ?input_path, output = ?output_path);
+    info!(input = ?input_path, output = ?output_path, detailed = detailed);
     info!(heap_mb = heap_size / 1024 / 1024, commit_interval = commit_interval);
 
     // Count total domains for progress
     info!("Counting domains in file...");
-    let total_count = DomainStream::count_file(input_path).await?;
+    let total_count = if detailed {
+        DetailedDomainStream::count_file(input_path).await?
+    } else {
+        DomainStream::count_file(input_path).await?
+    };
     info!(total = total_count, "Total domains to index");
 
     // Create Tantivy index
@@ -59,82 +73,147 @@ pub async fn run(
         Some(4), // 4 parallel API requests
     )?;
 
-    // Set up progress tracking
     let mut progress = IndexProgress::new(total_count);
-
-    // Process domains in batches
-    let domain_stream = DomainStream::from_file(input_path);
-    let batched_stream = batch_stream(domain_stream, config.word_batch_size);
-
-    futures::pin_mut!(batched_stream);
-
     let mut indexed_count: u64 = 0;
     let mut filtered_count: u64 = 0;
     let mut error_count: u64 = 0;
     let mut last_commit: u64 = 0;
 
-    while let Some(batch_result) = batched_stream.next().await {
-        let batch: Vec<String> = batch_result?;
-        let batch_size = batch.len();
+    if detailed {
+        // DETAILED MODE: parse CSV and attach metadata
+        let record_stream = DetailedDomainStream::from_file(input_path);
+        let batched_stream = batch_stream_detailed(record_stream, config.word_batch_size);
+        futures::pin_mut!(batched_stream);
 
-        // Normalize and filter domains
-        let mut valid_domains: Vec<(String, domain_core::NormalizedDomain)> = Vec::new();
-        let mut labels_to_segment: Vec<String> = Vec::new();
+        while let Some(batch_result) = batched_stream.next().await {
+            let batch = batch_result?;
+            let batch_size = batch.len();
 
-        for raw_domain in &batch {
-            let domain = Domain::new(raw_domain);
+            let mut valid_domains: Vec<domain_core::NormalizedDomain> = Vec::new();
+            let mut labels_to_segment: Vec<String> = Vec::new();
 
-            match domain.normalize() {
-                Ok(normalized) => {
-                    // Apply filtering rules
-                    if should_filter_domain(&normalized.label) {
-                        filtered_count += 1;
-                        continue;
+            for record in &batch {
+                let domain = Domain::new(&record.domain);
+
+                match domain.normalize() {
+                    Ok(normalized) => {
+                        if should_filter_domain(&normalized.label) {
+                            filtered_count += 1;
+                            continue;
+                        }
+
+                        let detail = DetailedRecord {
+                            dns_servers: record.dns_servers.clone(),
+                            ip: record.ip.clone(),
+                            country: record.country.clone(),
+                            web_server: record.web_server.clone(),
+                            email: record.email.clone(),
+                            phone: record.phone.clone(),
+                            seo_rank: record.seo_rank.clone(),
+                        };
+
+                        labels_to_segment.push(normalized.label.clone());
+                        valid_domains.push(normalized.with_detailed(detail));
                     }
-
-                    labels_to_segment.push(normalized.label.clone());
-                    valid_domains.push((raw_domain.clone(), normalized));
-                }
-                Err(e) => {
-                    debug!(domain = raw_domain, error = %e, "Failed to normalize domain");
-                    error_count += 1;
+                    Err(e) => {
+                        debug!(domain = &record.domain, error = %e, "Failed to normalize");
+                        error_count += 1;
+                    }
                 }
             }
-        }
 
-        // Segment labels in batch
-        if !labels_to_segment.is_empty() {
-            match word_client.segment_batch(labels_to_segment).await {
-                Ok(segments) => {
-                    // Match segments with domains by index
-                    for (i, (_, tokens)) in segments.iter().enumerate() {
-                        if i < valid_domains.len() {
-                            valid_domains[i].1.tokens = tokens.clone();
+            // Word segmentation
+            if !labels_to_segment.is_empty() {
+                match word_client.segment_batch(labels_to_segment).await {
+                    Ok(segments) => {
+                        for (i, (_, tokens)) in segments.iter().enumerate() {
+                            if i < valid_domains.len() {
+                                valid_domains[i].tokens = tokens.clone();
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(error = %e, "Word segmentation failed for batch, using empty tokens");
-                    // Continue without tokens - domains will still be searchable by exact match
+                    Err(e) => {
+                        warn!(error = %e, "Word segmentation failed for batch");
+                    }
                 }
             }
-        }
 
-        // Add documents to index
-        for (_, normalized) in &valid_domains {
-            let doc = schema.to_document(normalized);
-            writer.add_document(doc)?;
-            indexed_count += 1;
-        }
+            for normalized in &valid_domains {
+                let doc = schema.to_document(normalized);
+                writer.add_document(doc)?;
+                indexed_count += 1;
+            }
 
-        // Commit periodically
-        if indexed_count - last_commit >= commit_interval as u64 {
-            info!(indexed = indexed_count, "Committing checkpoint...");
-            writer.commit()?;
-            last_commit = indexed_count;
-        }
+            if indexed_count - last_commit >= commit_interval as u64 {
+                info!(indexed = indexed_count, "Committing checkpoint...");
+                writer.commit()?;
+                last_commit = indexed_count;
+            }
 
-        progress.inc(batch_size as u64);
+            progress.inc(batch_size as u64);
+        }
+    } else {
+        // PLAIN MODE: existing domain-per-line format
+        let domain_stream = DomainStream::from_file(input_path);
+        let batched_stream = batch_stream(domain_stream, config.word_batch_size);
+        futures::pin_mut!(batched_stream);
+
+        while let Some(batch_result) = batched_stream.next().await {
+            let batch: Vec<String> = batch_result?;
+            let batch_size = batch.len();
+
+            let mut valid_domains: Vec<(String, domain_core::NormalizedDomain)> = Vec::new();
+            let mut labels_to_segment: Vec<String> = Vec::new();
+
+            for raw_domain in &batch {
+                let domain = Domain::new(raw_domain);
+
+                match domain.normalize() {
+                    Ok(normalized) => {
+                        if should_filter_domain(&normalized.label) {
+                            filtered_count += 1;
+                            continue;
+                        }
+
+                        labels_to_segment.push(normalized.label.clone());
+                        valid_domains.push((raw_domain.clone(), normalized));
+                    }
+                    Err(e) => {
+                        debug!(domain = raw_domain, error = %e, "Failed to normalize domain");
+                        error_count += 1;
+                    }
+                }
+            }
+
+            if !labels_to_segment.is_empty() {
+                match word_client.segment_batch(labels_to_segment).await {
+                    Ok(segments) => {
+                        for (i, (_, tokens)) in segments.iter().enumerate() {
+                            if i < valid_domains.len() {
+                                valid_domains[i].1.tokens = tokens.clone();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Word segmentation failed for batch, using empty tokens");
+                    }
+                }
+            }
+
+            for (_, normalized) in &valid_domains {
+                let doc = schema.to_document(normalized);
+                writer.add_document(doc)?;
+                indexed_count += 1;
+            }
+
+            if indexed_count - last_commit >= commit_interval as u64 {
+                info!(indexed = indexed_count, "Committing checkpoint...");
+                writer.commit()?;
+                last_commit = indexed_count;
+            }
+
+            progress.inc(batch_size as u64);
+        }
     }
 
     // Final commit

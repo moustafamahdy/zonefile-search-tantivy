@@ -40,8 +40,8 @@ async fn main() -> Result<()> {
     info!(index_path = ?config.index_path, "Opening index");
 
     // Open Tantivy index
-    let schema = DomainSchema::new();
     let index = Index::open_in_dir(&config.index_path)?;
+    let schema = DomainSchema::from_existing(&index.schema());
 
     // Warm up the index reader
     let reader = index.reader()?;

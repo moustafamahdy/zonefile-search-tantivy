@@ -4,4 +4,6 @@ pub mod parser;
 
 pub use downloader::{ZonefileDownloader, ZonefileType};
 pub use error::{Error, Result};
-pub use parser::DomainStream;
+pub use parser::{
+    batch_stream, batch_stream_detailed, DetailedDomainStream, DetailedLine, DomainStream,
+};

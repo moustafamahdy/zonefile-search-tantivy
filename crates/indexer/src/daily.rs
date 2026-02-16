@@ -1,29 +1,43 @@
 use crate::progress::IndexProgress;
 use anyhow::Result;
-use domain_core::{domain::should_filter_domain, Config, Domain, DomainSchema};
+use domain_core::{domain::should_filter_domain, Config, DetailedRecord, Domain, DomainSchema};
 use futures::StreamExt;
 use std::path::Path;
 use tantivy::{Index, Term};
 use tracing::{debug, info, warn};
 use word_client::WordClient;
-use zonefile_client::{parser::batch_stream, DomainStream, ZonefileDownloader, ZonefileType};
+use zonefile_client::{
+    batch_stream, batch_stream_detailed, DetailedDomainStream, DomainStream, ZonefileDownloader,
+    ZonefileType,
+};
 
 /// Run daily sync with download from API
-pub async fn run_with_download(config: &Config, index_path: &Path) -> Result<()> {
+pub async fn run_with_download(
+    config: &Config,
+    index_path: &Path,
+    detailed: bool,
+) -> Result<()> {
     let downloader = ZonefileDownloader::new(
         &config.zonefile_api_url,
         &config.zonefile_token,
         std::env::temp_dir().join("zonefile-indexer"),
     )?;
 
-    // Download both files
-    info!("Downloading daily update file...");
-    let adds_path = downloader.download(ZonefileType::DailyUpdate).await?;
+    // Download adds file (detailed or plain)
+    let adds_type = if detailed {
+        ZonefileType::DetailedDailyUpdate
+    } else {
+        ZonefileType::DailyUpdate
+    };
 
+    info!("Downloading daily update file...");
+    let adds_path = downloader.download(adds_type).await?;
+
+    // Removals are always plain domain lists (no detailed version exists)
     info!("Downloading daily remove file...");
     let removes_path = downloader.download(ZonefileType::DailyRemove).await?;
 
-    run(config, Some(adds_path), Some(removes_path), index_path).await
+    run(config, Some(adds_path), Some(removes_path), index_path, detailed).await
 }
 
 /// Run daily sync from local files
@@ -32,6 +46,7 @@ pub async fn run(
     adds_path: Option<impl AsRef<Path>>,
     removes_path: Option<impl AsRef<Path>>,
     index_path: &Path,
+    detailed: bool,
 ) -> Result<()> {
     info!("Starting daily sync");
 
@@ -50,13 +65,13 @@ pub async fn run(
         &config.word_splitter_user,
         &config.word_splitter_pass,
         Some(config.word_batch_size),
-        Some(4), // 4 parallel API requests
+        Some(4),
     )?;
 
     let mut total_deleted: u64 = 0;
     let mut total_added: u64 = 0;
 
-    // Process removals first
+    // Process removals first (always plain format)
     if let Some(removes_path) = removes_path {
         let removes_path = removes_path.as_ref();
         if removes_path.exists() {
@@ -66,12 +81,20 @@ pub async fn run(
         }
     }
 
-    // Process additions
+    // Process additions (detailed or plain)
     if let Some(adds_path) = adds_path {
         let adds_path = adds_path.as_ref();
         if adds_path.exists() {
-            info!(path = ?adds_path, "Processing additions...");
-            total_added = process_additions(config, &schema, &word_client, &mut writer, adds_path).await?;
+            info!(path = ?adds_path, detailed = detailed, "Processing additions...");
+            total_added = process_additions(
+                config,
+                &schema,
+                &word_client,
+                &mut writer,
+                adds_path,
+                detailed,
+            )
+            .await?;
             info!(added = total_added, "Additions complete");
         }
     }
@@ -102,7 +125,7 @@ async fn process_removals(
     removes_path: &Path,
 ) -> Result<u64> {
     let domain_stream = DomainStream::from_file(removes_path);
-    let batched = batch_stream(domain_stream, 10_000); // Smaller batches for deletes
+    let batched = batch_stream(domain_stream, 10_000);
 
     futures::pin_mut!(batched);
 
@@ -117,8 +140,8 @@ async fn process_removals(
 
             match domain.normalize() {
                 Ok(normalized) => {
-                    // Delete by domain_exact term
-                    let term = Term::from_field_text(schema.domain_exact, &normalized.domain_exact);
+                    let term =
+                        Term::from_field_text(schema.domain_exact, &normalized.domain_exact);
                     writer.delete_term(term);
                     deleted += 1;
                 }
@@ -141,70 +164,140 @@ async fn process_additions(
     word_client: &WordClient,
     writer: &mut tantivy::IndexWriter,
     adds_path: &Path,
+    detailed: bool,
 ) -> Result<u64> {
-    let domain_stream = DomainStream::from_file(adds_path);
-    let batched = batch_stream(domain_stream, config.word_batch_size);
-
-    futures::pin_mut!(batched);
-
     let mut progress = IndexProgress::spinner();
     let mut added: u64 = 0;
     let mut filtered: u64 = 0;
 
-    while let Some(batch_result) = batched.next().await {
-        let batch: Vec<String> = batch_result?;
-        let batch_size = batch.len();
+    if detailed {
+        // DETAILED MODE: parse CSV and attach metadata
+        let record_stream = DetailedDomainStream::from_file(adds_path);
+        let batched = batch_stream_detailed(record_stream, config.word_batch_size);
+        futures::pin_mut!(batched);
 
-        // Normalize and filter
-        let mut valid_domains: Vec<domain_core::NormalizedDomain> = Vec::new();
-        let mut labels_to_segment: Vec<String> = Vec::new();
+        while let Some(batch_result) = batched.next().await {
+            let batch = batch_result?;
+            let batch_size = batch.len();
 
-        for raw_domain in &batch {
-            let domain = Domain::new(raw_domain);
+            let mut valid_domains: Vec<domain_core::NormalizedDomain> = Vec::new();
+            let mut labels_to_segment: Vec<String> = Vec::new();
 
-            match domain.normalize() {
-                Ok(normalized) => {
-                    if should_filter_domain(&normalized.label) {
-                        filtered += 1;
-                        continue;
+            for record in &batch {
+                let domain = Domain::new(&record.domain);
+
+                match domain.normalize() {
+                    Ok(normalized) => {
+                        if should_filter_domain(&normalized.label) {
+                            filtered += 1;
+                            continue;
+                        }
+
+                        let detail = DetailedRecord {
+                            dns_servers: record.dns_servers.clone(),
+                            ip: record.ip.clone(),
+                            country: record.country.clone(),
+                            web_server: record.web_server.clone(),
+                            email: record.email.clone(),
+                            phone: record.phone.clone(),
+                            seo_rank: record.seo_rank.clone(),
+                        };
+
+                        labels_to_segment.push(normalized.label.clone());
+                        valid_domains.push(normalized.with_detailed(detail));
                     }
-
-                    labels_to_segment.push(normalized.label.clone());
-                    valid_domains.push(normalized);
-                }
-                Err(e) => {
-                    debug!(domain = raw_domain, error = %e, "Failed to normalize");
+                    Err(e) => {
+                        debug!(domain = &record.domain, error = %e, "Failed to normalize");
+                    }
                 }
             }
-        }
 
-        // Segment labels
-        if !labels_to_segment.is_empty() {
-            match word_client.segment_batch(labels_to_segment).await {
-                Ok(segments) => {
-                    for (normalized, (_, tokens)) in valid_domains.iter_mut().zip(segments.iter()) {
-                        normalized.tokens = tokens.clone();
+            if !labels_to_segment.is_empty() {
+                match word_client.segment_batch(labels_to_segment).await {
+                    Ok(segments) => {
+                        for (normalized, (_, tokens)) in
+                            valid_domains.iter_mut().zip(segments.iter())
+                        {
+                            normalized.tokens = tokens.clone();
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Word segmentation failed");
                     }
                 }
-                Err(e) => {
-                    warn!(error = %e, "Word segmentation failed, using empty tokens");
+            }
+
+            for normalized in &valid_domains {
+                let term =
+                    Term::from_field_text(schema.domain_exact, &normalized.domain_exact);
+                writer.delete_term(term);
+
+                let doc = schema.to_document(normalized);
+                writer.add_document(doc)?;
+                added += 1;
+            }
+
+            progress.inc(batch_size as u64);
+        }
+    } else {
+        // PLAIN MODE: domain-per-line format
+        let domain_stream = DomainStream::from_file(adds_path);
+        let batched = batch_stream(domain_stream, config.word_batch_size);
+        futures::pin_mut!(batched);
+
+        while let Some(batch_result) = batched.next().await {
+            let batch: Vec<String> = batch_result?;
+            let batch_size = batch.len();
+
+            let mut valid_domains: Vec<domain_core::NormalizedDomain> = Vec::new();
+            let mut labels_to_segment: Vec<String> = Vec::new();
+
+            for raw_domain in &batch {
+                let domain = Domain::new(raw_domain);
+
+                match domain.normalize() {
+                    Ok(normalized) => {
+                        if should_filter_domain(&normalized.label) {
+                            filtered += 1;
+                            continue;
+                        }
+
+                        labels_to_segment.push(normalized.label.clone());
+                        valid_domains.push(normalized);
+                    }
+                    Err(e) => {
+                        debug!(domain = raw_domain, error = %e, "Failed to normalize");
+                    }
                 }
             }
+
+            if !labels_to_segment.is_empty() {
+                match word_client.segment_batch(labels_to_segment).await {
+                    Ok(segments) => {
+                        for (normalized, (_, tokens)) in
+                            valid_domains.iter_mut().zip(segments.iter())
+                        {
+                            normalized.tokens = tokens.clone();
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Word segmentation failed, using empty tokens");
+                    }
+                }
+            }
+
+            for normalized in &valid_domains {
+                let term =
+                    Term::from_field_text(schema.domain_exact, &normalized.domain_exact);
+                writer.delete_term(term);
+
+                let doc = schema.to_document(normalized);
+                writer.add_document(doc)?;
+                added += 1;
+            }
+
+            progress.inc(batch_size as u64);
         }
-
-        // Add to index
-        for normalized in &valid_domains {
-            // Delete existing document first (in case it's a re-add)
-            let term = Term::from_field_text(schema.domain_exact, &normalized.domain_exact);
-            writer.delete_term(term);
-
-            // Add new document
-            let doc = schema.to_document(normalized);
-            writer.add_document(doc)?;
-            added += 1;
-        }
-
-        progress.inc(batch_size as u64);
     }
 
     progress.finish();

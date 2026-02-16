@@ -67,10 +67,22 @@ impl Cache {
     }
 
     /// Generate a cache key from query parameters
-    pub fn make_key(query: &str, tld: Option<&str>, limit: u32, min_match: Option<u32>) -> String {
+    pub fn make_key(
+        query: &str,
+        tld: Option<&str>,
+        limit: u32,
+        min_match: Option<u32>,
+        country: Option<&str>,
+        web_server: Option<&str>,
+    ) -> String {
         let tld_part = tld.unwrap_or("any");
         let min_match_part = min_match.unwrap_or(1);
-        format!("search:{}|{}|{}|{}", query, tld_part, limit, min_match_part)
+        let country_part = country.unwrap_or("any");
+        let ws_part = web_server.unwrap_or("any");
+        format!(
+            "search:{}|{}|{}|{}|{}|{}",
+            query, tld_part, limit, min_match_part, country_part, ws_part
+        )
     }
 
     /// Check if cache is healthy

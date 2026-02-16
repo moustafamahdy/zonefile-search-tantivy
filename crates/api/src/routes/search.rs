@@ -28,6 +28,12 @@ pub struct SearchQuery {
 
     /// Minimum number of keywords that must match
     pub min_match: Option<u32>,
+
+    /// Filter by country code (e.g., "us", "de")
+    pub country: Option<String>,
+
+    /// Filter by web server (e.g., "nginx", "apache")
+    pub web_server: Option<String>,
 }
 
 fn default_limit() -> u32 {
@@ -62,6 +68,8 @@ pub struct BulkQuery {
     pub q: String,
     pub tld: Option<String>,
     pub min_match: Option<u32>,
+    pub country: Option<String>,
+    pub web_server: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -84,6 +92,8 @@ pub async fn search(
             params.tld.as_deref(),
             params.limit,
             params.min_match,
+            params.country.as_deref(),
+            params.web_server.as_deref(),
         );
 
         if let Ok(Some(cached)) = cache.get::<SearchResponse>(&cache_key).await {
@@ -104,6 +114,8 @@ pub async fn search(
             params.tld.as_deref(),
             params.limit,
             params.min_match,
+            params.country.as_deref(),
+            params.web_server.as_deref(),
         );
         let _ = cache.set(&cache_key, &response).await;
     }
@@ -147,6 +159,8 @@ async fn execute_search(
     let query = BooleanQuery::new(token_queries);
     let num_query_tokens = query_tokens.len();
     let tld_filter = params.tld.as_ref().map(|t| t.to_lowercase());
+    let country_filter = params.country.as_ref().map(|c| c.to_lowercase());
+    let web_server_filter = params.web_server.as_ref().map(|w| w.to_lowercase());
 
     // Get reader and searcher
     let reader = state.index.reader().map_err(|e| {
@@ -155,16 +169,18 @@ async fn execute_search(
     let searcher = reader.searcher();
 
     // Smart candidate limit based on query complexity
-    // Single keyword: fewer candidates needed (BM25 order is already good)
-    // Multi-keyword: need more candidates to find high match-count results
-    // TLD filter: need more candidates since we'll filter many out
     let base_limit = if num_query_tokens == 1 {
         params.limit as usize * 20
     } else {
         params.limit as usize * 50
     };
-    let candidate_limit = if tld_filter.is_some() {
-        base_limit.min(3000) // More candidates for TLD filtering
+
+    let has_post_filters = tld_filter.is_some()
+        || country_filter.is_some()
+        || web_server_filter.is_some();
+
+    let candidate_limit = if has_post_filters {
+        base_limit.min(5000) // More candidates when filtering
     } else {
         base_limit.min(1000)
     };
@@ -205,6 +221,22 @@ async fn execute_search(
         if let Some(ref tld) = tld_filter {
             if &domain_result.tld != tld {
                 continue;
+            }
+        }
+
+        // Filter by country if specified
+        if let Some(ref country) = country_filter {
+            match &domain_result.country {
+                Some(dc) if dc.to_lowercase() == *country => {}
+                _ => continue,
+            }
+        }
+
+        // Filter by web_server if specified (contains match)
+        if let Some(ref ws) = web_server_filter {
+            match &domain_result.web_server {
+                Some(dws) if dws.to_lowercase().contains(ws.as_str()) => {}
+                _ => continue,
             }
         }
 
@@ -308,6 +340,8 @@ pub async fn bulk_search(
             tld: query.tld.clone(),
             limit: request.limit,
             min_match: query.min_match,
+            country: query.country.clone(),
+            web_server: query.web_server.clone(),
         };
 
         // Check cache
@@ -317,6 +351,8 @@ pub async fn bulk_search(
                 params.tld.as_deref(),
                 params.limit,
                 params.min_match,
+                params.country.as_deref(),
+                params.web_server.as_deref(),
             );
 
             if let Ok(Some(cached)) = cache.get::<SearchResponse>(&cache_key).await {
@@ -337,6 +373,8 @@ pub async fn bulk_search(
                         params.tld.as_deref(),
                         params.limit,
                         params.min_match,
+                        params.country.as_deref(),
+                        params.web_server.as_deref(),
                     );
                     let _ = cache.set(&cache_key, &response).await;
                 }

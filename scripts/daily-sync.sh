@@ -32,7 +32,12 @@ fi
 
 # Run daily sync
 log "Downloading and applying updates..."
-./target/release/domain-indexer daily --download --index "${INDEX_PATH:-./data/index}" 2>&1 | tee -a "$LOG_FILE"
+DETAILED_FLAG=""
+if [ "${DETAILED_MODE:-false}" = "true" ]; then
+    DETAILED_FLAG="--detailed"
+    log "Using detailed mode"
+fi
+./target/release/domain-indexer daily --download ${DETAILED_FLAG} --index "${INDEX_PATH:-./data/index}" 2>&1 | tee -a "$LOG_FILE"
 
 # Note: API auto-reloads via Tantivy's file watcher (no restart needed)
 
