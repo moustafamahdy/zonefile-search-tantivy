@@ -77,18 +77,13 @@ jobs:
       - name: Make binaries executable
         run: chmod +x ./binaries/*
 
-      - name: Configure SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Create backup
-        run: |
-          ssh -i ~/.ssh/deploy_key \
-            -p ${{ secrets.SSH_PORT || 22 }} \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} '
+      - name: Create backup on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             mkdir -p ${{ secrets.DEPLOYMENT_PATH }}/backups
             if [ -f ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-api ]; then
@@ -101,102 +96,73 @@ jobs:
               ls -t domain-api.* 2>/dev/null | tail -n +6 | xargs -r rm
               ls -t domain-indexer.* 2>/dev/null | tail -n +6 | xargs -r rm
             fi
-          '
 
-      - name: Deploy binaries
-        run: |
-          scp -i ~/.ssh/deploy_key \
-            -P ${{ secrets.SSH_PORT || 22 }} \
-            ./binaries/domain-api ./binaries/domain-indexer \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOYMENT_PATH }}/target/release/
+      - name: Deploy binaries to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "binaries/domain-api,binaries/domain-indexer"
+          target: "${{ secrets.DEPLOYMENT_PATH }}/target/release/"
+          strip_components: 1
 
-      - name: Restart PM2 service
+      - name: Restart PM2 and verify deployment
         id: restart
-        run: |
-          ssh -i ~/.ssh/deploy_key \
-            -p ${{ secrets.SSH_PORT || 22 }} \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
-            "cd ${{ secrets.DEPLOYMENT_PATH }} && pm2 restart zonefile-api --update-env"
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ${{ secrets.DEPLOYMENT_PATH }}
+            chmod +x target/release/domain-api target/release/domain-indexer
+            pm2 restart zonefile-api --update-env
 
-      - name: Health check with retry
-        id: health_check
-        run: |
-          MAX_ATTEMPTS=10
-          ATTEMPT=1
-          WAIT_TIME=2
+            # Health check with retry
+            MAX_ATTEMPTS=10
+            ATTEMPT=1
+            WAIT_TIME=2
 
-          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS..."
+            while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+              echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS..."
+              HEALTH_STATUS=$(curl -sf http://localhost:3003/health || echo "failed")
 
-            HEALTH_STATUS=$(ssh -i ~/.ssh/deploy_key \
-              -p ${{ secrets.SSH_PORT || 22 }} \
-              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
-              "curl -sf http://localhost:3003/health" || echo "failed")
-
-            if echo "$HEALTH_STATUS" | grep -q '"status":"ok"'; then
-              echo "✓ Deployment successful! API is healthy."
-              DOC_COUNT=$(echo "$HEALTH_STATUS" | jq -r '.index_documents' 2>/dev/null || echo "0")
-              echo "Index documents: $DOC_COUNT"
-
-              if [ "$DOC_COUNT" -gt 0 ]; then
-                echo "✓ Index loaded successfully"
+              if echo "$HEALTH_STATUS" | grep -q '"status":"ok"'; then
+                DOC_COUNT=$(echo "$HEALTH_STATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('index_documents',0))" 2>/dev/null || echo "0")
+                echo "✓ Deployment successful! Index documents: $DOC_COUNT"
                 exit 0
-              else
-                echo "⚠ Warning: Index appears empty"
-                exit 1
               fi
-            fi
 
-            echo "Health check failed, waiting ${WAIT_TIME}s..."
-            sleep $WAIT_TIME
-            WAIT_TIME=$((WAIT_TIME * 2))
-            ATTEMPT=$((ATTEMPT + 1))
-          done
+              echo "Health check failed, waiting ${WAIT_TIME}s..."
+              sleep $WAIT_TIME
+              WAIT_TIME=$((WAIT_TIME * 2))
+              ATTEMPT=$((ATTEMPT + 1))
+            done
 
-          echo "✗ Deployment failed: Health checks did not pass"
-          exit 1
+            echo "✗ Health checks failed after $MAX_ATTEMPTS attempts"
+            exit 1
 
       - name: Rollback on failure
-        if: failure() && steps.restart.conclusion == 'success'
-        run: |
-          echo "🔄 Initiating rollback..."
+        if: failure() && steps.restart.conclusion != 'skipped'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "🔄 Initiating rollback..."
+            LAST_BACKUP=$(cat ${{ secrets.DEPLOYMENT_PATH }}/backups/latest 2>/dev/null || echo "none")
 
-          LAST_BACKUP=$(ssh -i ~/.ssh/deploy_key \
-            -p ${{ secrets.SSH_PORT || 22 }} \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
-            "cat ${{ secrets.DEPLOYMENT_PATH }}/backups/latest 2>/dev/null || echo 'none'")
-
-          if [ "$LAST_BACKUP" != "none" ]; then
-            ssh -i ~/.ssh/deploy_key \
-              -p ${{ secrets.SSH_PORT || 22 }} \
-              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
-              "cp ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-api.$LAST_BACKUP \
-                  ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-api && \
-               cp ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-indexer.$LAST_BACKUP \
-                  ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-indexer && \
-               pm2 restart zonefile-api"
-
-            sleep 5
-
-            ROLLBACK_HEALTH=$(ssh -i ~/.ssh/deploy_key \
-              -p ${{ secrets.SSH_PORT || 22 }} \
-              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
-              "curl -sf http://localhost:3003/health")
-
-            if echo "$ROLLBACK_HEALTH" | grep -q '"status":"ok"'; then
-              echo "✓ Rollback successful"
+            if [ "$LAST_BACKUP" != "none" ]; then
+              cp ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-api.$LAST_BACKUP \
+                 ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-api
+              cp ${{ secrets.DEPLOYMENT_PATH }}/backups/domain-indexer.$LAST_BACKUP \
+                 ${{ secrets.DEPLOYMENT_PATH }}/target/release/domain-indexer
+              pm2 restart zonefile-api
+              sleep 5
+              curl -sf http://localhost:3003/health | grep -q '"status":"ok"' && \
+                echo "✓ Rollback successful" || echo "✗ Rollback failed! Manual intervention required."
             else
-              echo "✗ CRITICAL: Rollback failed! Manual intervention required."
-              exit 1
+              echo "⚠ No backup available for rollback"
             fi
-          else
-            echo "⚠ No backup available for rollback"
-            exit 1
-          fi
-
-      - name: Deployment summary
-        if: success()
-        run: |
-          echo "::notice::Deployment completed successfully at $(date)"
-          echo "::notice::Commit: ${{ github.sha }}"
-          echo "::notice::Author: ${{ github.actor }}"
