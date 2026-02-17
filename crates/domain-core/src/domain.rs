@@ -137,8 +137,8 @@ pub fn should_filter_domain(label: &str) -> bool {
         }
     }
 
-    // Filter labels that start with digit and contain only digits/hyphens
-    if label.starts_with(|c: char| c.is_ascii_digit()) {
+    // Filter labels that start with digit and contain only digits/hyphens (e.g. "123-456")
+    if label.starts_with(|c: char| c.is_ascii_digit()) && label.contains('-') {
         if label.chars().all(|c| c.is_ascii_digit() || c == '-') {
             return true;
         }
