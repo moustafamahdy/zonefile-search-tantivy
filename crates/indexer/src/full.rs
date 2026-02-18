@@ -126,9 +126,11 @@ pub async fn run(
             if !labels_to_segment.is_empty() {
                 match word_client.segment_batch(labels_to_segment).await {
                     Ok(segments) => {
-                        for (i, (_, tokens)) in segments.iter().enumerate() {
-                            if i < valid_domains.len() {
-                                valid_domains[i].tokens = tokens.clone();
+                        let token_map: std::collections::HashMap<&str, &Vec<String>> =
+                            segments.iter().map(|(label, tokens)| (label.as_str(), tokens)).collect();
+                        for normalized in valid_domains.iter_mut() {
+                            if let Some(tokens) = token_map.get(normalized.label.as_str()) {
+                                normalized.tokens = (*tokens).clone();
                             }
                         }
                     }
@@ -188,9 +190,11 @@ pub async fn run(
             if !labels_to_segment.is_empty() {
                 match word_client.segment_batch(labels_to_segment).await {
                     Ok(segments) => {
-                        for (i, (_, tokens)) in segments.iter().enumerate() {
-                            if i < valid_domains.len() {
-                                valid_domains[i].1.tokens = tokens.clone();
+                        let token_map: std::collections::HashMap<&str, &Vec<String>> =
+                            segments.iter().map(|(label, tokens)| (label.as_str(), tokens)).collect();
+                        for (_, normalized) in valid_domains.iter_mut() {
+                            if let Some(tokens) = token_map.get(normalized.label.as_str()) {
+                                normalized.tokens = (*tokens).clone();
                             }
                         }
                     }
