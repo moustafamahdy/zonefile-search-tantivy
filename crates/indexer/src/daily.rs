@@ -215,11 +215,17 @@ async fn process_additions(
             if !labels_to_segment.is_empty() {
                 match word_client.segment_batch(labels_to_segment).await {
                     Ok(segments) => {
-                        let token_map: std::collections::HashMap<&str, &Vec<String>> =
-                            segments.iter().map(|(label, tokens)| (label.as_str(), tokens)).collect();
+                        let token_map: std::collections::HashMap<&str, (&Vec<String>, &Vec<String>)> =
+                            segments.iter().map(|(label, seg, kw)| (label.as_str(), (seg, kw))).collect();
                         for normalized in valid_domains.iter_mut() {
-                            if let Some(tokens) = token_map.get(normalized.label.as_str()) {
-                                normalized.tokens = (*tokens).clone();
+                            if let Some((seg, kw)) = token_map.get(normalized.label.as_str()) {
+                                let mut tokens = (*seg).clone();
+                                for keyword in kw.iter() {
+                                    if !tokens.contains(keyword) {
+                                        tokens.push(keyword.clone());
+                                    }
+                                }
+                                normalized.tokens = tokens;
                             }
                         }
                     }
@@ -276,11 +282,17 @@ async fn process_additions(
             if !labels_to_segment.is_empty() {
                 match word_client.segment_batch(labels_to_segment).await {
                     Ok(segments) => {
-                        let token_map: std::collections::HashMap<&str, &Vec<String>> =
-                            segments.iter().map(|(label, tokens)| (label.as_str(), tokens)).collect();
+                        let token_map: std::collections::HashMap<&str, (&Vec<String>, &Vec<String>)> =
+                            segments.iter().map(|(label, seg, kw)| (label.as_str(), (seg, kw))).collect();
                         for normalized in valid_domains.iter_mut() {
-                            if let Some(tokens) = token_map.get(normalized.label.as_str()) {
-                                normalized.tokens = (*tokens).clone();
+                            if let Some((seg, kw)) = token_map.get(normalized.label.as_str()) {
+                                let mut tokens = (*seg).clone();
+                                for keyword in kw.iter() {
+                                    if !tokens.contains(keyword) {
+                                        tokens.push(keyword.clone());
+                                    }
+                                }
+                                normalized.tokens = tokens;
                             }
                         }
                     }

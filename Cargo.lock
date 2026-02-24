@@ -529,6 +529,7 @@ dependencies = [
  "dotenvy",
  "idna",
  "md5",
+ "rust-stemmers",
  "serde",
  "serde_json",
  "tantivy",

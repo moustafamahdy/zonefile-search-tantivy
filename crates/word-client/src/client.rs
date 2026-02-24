@@ -84,8 +84,8 @@ impl WordClient {
 
     /// Segment a batch of labels using parallel API calls
     ///
-    /// Returns a Vec of (label, segments) pairs in the same order as input
-    pub async fn segment_batch(&self, labels: Vec<String>) -> Result<Vec<(String, Vec<String>)>> {
+    /// Returns a Vec of (label, segmentation, keywords) tuples in the same order as input
+    pub async fn segment_batch(&self, labels: Vec<String>) -> Result<Vec<(String, Vec<String>, Vec<String>)>> {
         if labels.is_empty() {
             return Ok(Vec::new());
         }
@@ -141,7 +141,7 @@ impl WordClient {
     async fn segment_batch_internal(
         &self,
         labels: Vec<String>,
-    ) -> Result<Vec<(String, Vec<String>)>> {
+    ) -> Result<Vec<(String, Vec<String>, Vec<String>)>> {
         let url = format!("{}/segment/bulk", self.base_url);
 
         debug!(count = labels.len(), "Sending batch segmentation request");
@@ -166,12 +166,12 @@ impl WordClient {
 
         let bulk_response: BulkResponse = response.json().await?;
 
-        // Convert to (label, segments) pairs
+        // Convert to (label, segmentation, keywords) tuples
         // The API returns results in the same order as input
-        let results: Vec<(String, Vec<String>)> = bulk_response
+        let results: Vec<(String, Vec<String>, Vec<String>)> = bulk_response
             .results
             .into_iter()
-            .map(|r| (r.label, r.segmentation))
+            .map(|r| (r.label, r.segmentation, r.keywords))
             .collect();
 
         // Verify we got the expected number of results
@@ -187,13 +187,15 @@ impl WordClient {
     }
 
     /// Segment a single label (convenience method)
-    pub async fn segment_single(&self, label: &str) -> Result<Vec<String>> {
+    ///
+    /// Returns (segmentation, keywords)
+    pub async fn segment_single(&self, label: &str) -> Result<(Vec<String>, Vec<String>)> {
         let results = self.segment_batch(vec![label.to_string()]).await?;
 
         results
             .into_iter()
             .next()
-            .map(|(_, segments)| segments)
+            .map(|(_, segmentation, keywords)| (segmentation, keywords))
             .ok_or_else(|| Error::InvalidResponse("Empty response".to_string()))
     }
 }
