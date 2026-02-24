@@ -1,5 +1,4 @@
 use crate::domain::NormalizedDomain;
-use crate::stemmer::stem_tokens;
 use tantivy::schema::{
     Facet, FacetOptions, Field, NumericOptions, Schema, TextFieldIndexing, TextOptions,
     STORED, STRING,
@@ -135,9 +134,8 @@ impl DomainSchema {
         // domain_exact - full normalized domain
         doc.add_text(self.domain_exact, &domain.domain_exact);
 
-        // tokens - stem and dedup, then join with space for default tokenizer
-        let stemmed = stem_tokens(&domain.tokens);
-        let tokens_text = stemmed.join(" ");
+        // tokens - join with space for default tokenizer (API provides both forms via keywords)
+        let tokens_text = domain.tokens.join(" ");
         doc.add_text(self.tokens, &tokens_text);
 
         // tld as facet (e.g., "/com")

@@ -130,12 +130,12 @@ async fn execute_search(
 ) -> Result<SearchResponse, (StatusCode, String)> {
     let start = std::time::Instant::now();
 
-    // Parse query into tokens and stem them to match index-time stemming
+    // Parse query into lowercase tokens (no stemming — index stores both forms from API keywords)
     let query_tokens: Vec<String> = params
         .q
         .to_lowercase()
         .split_whitespace()
-        .map(|t| domain_core::stem_token(t))
+        .map(String::from)
         .collect();
 
     if query_tokens.is_empty() {
