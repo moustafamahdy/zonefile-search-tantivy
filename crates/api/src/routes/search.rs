@@ -257,56 +257,27 @@ async fn execute_search(
         }
     }
 
-    // Separate hyphenated and non-hyphenated domains
-    let (mut hyphenated, mut non_hyphenated): (Vec<_>, Vec<_>) = ranked_results
-        .into_iter()
-        .partition(|r| r.domain.has_hyphen);
+    let total_candidates = ranked_results.len();
 
-    // Sort each group by: match_count DESC, length ASC, bm25 DESC
-    let sort_fn = |a: &RankedResult, b: &RankedResult| {
+    // Sort all results by: match_count DESC, has_hyphen ASC (non-hyphen first), length ASC, bm25 DESC
+    ranked_results.sort_by(|a, b| {
         b.match_count
             .cmp(&a.match_count)
+            .then_with(|| a.domain.has_hyphen.cmp(&b.domain.has_hyphen))
             .then_with(|| a.domain.length.cmp(&b.domain.length))
             .then_with(|| b.bm25_score.partial_cmp(&a.bm25_score).unwrap_or(std::cmp::Ordering::Equal))
-    };
-    hyphenated.sort_by(sort_fn);
-    non_hyphenated.sort_by(sort_fn);
+    });
 
-    let total_candidates = hyphenated.len() + non_hyphenated.len();
-
-    // Interleave results 50/50 (hyphenated first, then non-hyphenated, alternating)
     let limit = params.limit as usize;
-    let mut results: Vec<SearchResult> = Vec::with_capacity(limit);
-
-    let mut hyp_iter = hyphenated.into_iter().peekable();
-    let mut non_hyp_iter = non_hyphenated.into_iter().peekable();
-
-    // Alternate: hyphenated, non-hyphenated, hyphenated, non-hyphenated...
-    while results.len() < limit {
-        // Add hyphenated first
-        if let Some(r) = hyp_iter.next() {
-            results.push(SearchResult {
-                domain: r.domain,
-                match_count: r.match_count,
-                score: r.bm25_score,
-            });
-        }
-        if results.len() >= limit {
-            break;
-        }
-        // Then add non-hyphenated
-        if let Some(r) = non_hyp_iter.next() {
-            results.push(SearchResult {
-                domain: r.domain,
-                match_count: r.match_count,
-                score: r.bm25_score,
-            });
-        }
-        // If both are exhausted, break
-        if hyp_iter.peek().is_none() && non_hyp_iter.peek().is_none() {
-            break;
-        }
-    }
+    let results: Vec<SearchResult> = ranked_results
+        .into_iter()
+        .take(limit)
+        .map(|r| SearchResult {
+            domain: r.domain,
+            match_count: r.match_count,
+            score: r.bm25_score,
+        })
+        .collect();
 
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
