@@ -3,7 +3,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use domain_core::{Config, DomainSchema};
+use domain_core::{register_ngram_tokenizer, Config, DomainSchema};
 use std::sync::Arc;
 use tantivy::Index;
 use tower_http::cors::CorsLayer;
@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
 
     // Open Tantivy index
     let index = Index::open_in_dir(&config.index_path)?;
+    register_ngram_tokenizer(&index);
     let schema = DomainSchema::from_existing(&index.schema());
 
     // Warm up the index reader

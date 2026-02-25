@@ -44,6 +44,10 @@ enum Commands {
         /// Use detailed zonefile format (CSV with IP, country, web server, etc.)
         #[arg(long)]
         detailed: bool,
+
+        /// Skip word segmentation API calls (trigram indexing still works)
+        #[arg(long)]
+        no_word_segment: bool,
     },
 
     /// Apply daily incremental updates (adds and deletes)
@@ -67,6 +71,10 @@ enum Commands {
         /// Use detailed zonefile format for additions (CSV with metadata)
         #[arg(long)]
         detailed: bool,
+
+        /// Skip word segmentation API calls (trigram indexing still works)
+        #[arg(long)]
+        no_word_segment: bool,
     },
 
     /// Show index statistics
@@ -105,14 +113,15 @@ async fn main() -> Result<()> {
             heap_gb,
             commit_interval,
             detailed,
+            no_word_segment,
         } => {
             let output_path = output.unwrap_or_else(|| config.index_path.clone());
             let heap_size = heap_gb * 1024 * 1024 * 1024;
 
             if download {
                 let mode = if detailed { "detailed" } else { "plain" };
-                info!(mode = mode, "Downloading full zonefile from API...");
-                full::run_with_download(&config, &output_path, heap_size, commit_interval, detailed)
+                info!(mode = mode, no_word_segment = no_word_segment, "Downloading full zonefile from API...");
+                full::run_with_download(&config, &output_path, heap_size, commit_interval, detailed, no_word_segment)
                     .await?;
             } else {
                 let input_path = input.ok_or_else(|| {
@@ -126,6 +135,7 @@ async fn main() -> Result<()> {
                     heap_size,
                     commit_interval,
                     detailed,
+                    no_word_segment,
                 )
                 .await?;
             }
@@ -137,16 +147,17 @@ async fn main() -> Result<()> {
             download,
             index,
             detailed,
+            no_word_segment,
         } => {
             let index_path = index.unwrap_or_else(|| config.index_path.clone());
 
             if download {
                 let mode = if detailed { "detailed" } else { "plain" };
-                info!(mode = mode, "Downloading daily updates from API...");
-                daily::run_with_download(&config, &index_path, detailed).await?;
+                info!(mode = mode, no_word_segment = no_word_segment, "Downloading daily updates from API...");
+                daily::run_with_download(&config, &index_path, detailed, no_word_segment).await?;
             } else {
                 info!(index = ?index_path, detailed = detailed, "Applying daily updates");
-                daily::run(&config, adds, removes, &index_path, detailed).await?;
+                daily::run(&config, adds, removes, &index_path, detailed, no_word_segment).await?;
             }
         }
 

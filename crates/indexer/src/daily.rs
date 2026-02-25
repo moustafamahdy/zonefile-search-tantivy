@@ -1,6 +1,9 @@
 use crate::progress::IndexProgress;
 use anyhow::Result;
-use domain_core::{domain::should_filter_domain, Config, DetailedRecord, Domain, DomainSchema};
+use domain_core::{
+    domain::should_filter_domain, register_ngram_tokenizer, Config, DetailedRecord, Domain,
+    DomainSchema,
+};
 use futures::StreamExt;
 use std::path::Path;
 use tantivy::{Index, Term};
@@ -16,6 +19,7 @@ pub async fn run_with_download(
     config: &Config,
     index_path: &Path,
     detailed: bool,
+    no_word_segment: bool,
 ) -> Result<()> {
     let downloader = ZonefileDownloader::new(
         &config.zonefile_api_url,
@@ -37,7 +41,7 @@ pub async fn run_with_download(
     info!("Downloading daily remove file...");
     let removes_path = downloader.download(ZonefileType::DailyRemove).await?;
 
-    run(config, Some(adds_path), Some(removes_path), index_path, detailed).await
+    run(config, Some(adds_path), Some(removes_path), index_path, detailed, no_word_segment).await
 }
 
 /// Run daily sync from local files
@@ -47,12 +51,14 @@ pub async fn run(
     removes_path: Option<impl AsRef<Path>>,
     index_path: &Path,
     detailed: bool,
+    no_word_segment: bool,
 ) -> Result<()> {
     info!("Starting daily sync");
 
     // Open existing index
     let schema = DomainSchema::new();
     let index = Index::open_in_dir(index_path)?;
+    register_ngram_tokenizer(&index);
     let reader = index.reader()?;
     let initial_count = reader.searcher().num_docs();
 
@@ -60,13 +66,18 @@ pub async fn run(
 
     let mut writer = index.writer(500 * 1024 * 1024)?; // 500MB heap for daily updates
 
-    let word_client = WordClient::new(
-        &config.word_splitter_url,
-        &config.word_splitter_user,
-        &config.word_splitter_pass,
-        Some(config.word_batch_size),
-        Some(4),
-    )?;
+    let word_client = if no_word_segment {
+        info!("Word segmentation disabled (--no-word-segment)");
+        None
+    } else {
+        Some(WordClient::new(
+            &config.word_splitter_url,
+            &config.word_splitter_user,
+            &config.word_splitter_pass,
+            Some(config.word_batch_size),
+            Some(4),
+        )?)
+    };
 
     let mut total_deleted: u64 = 0;
     let mut total_added: u64 = 0;
@@ -95,6 +106,7 @@ pub async fn run(
                 detailed,
             )
             .await?;
+
             info!(added = total_added, "Additions complete");
         }
     }
@@ -161,7 +173,7 @@ async fn process_removals(
 async fn process_additions(
     config: &Config,
     schema: &DomainSchema,
-    word_client: &WordClient,
+    word_client: &Option<WordClient>,
     writer: &mut tantivy::IndexWriter,
     adds_path: &Path,
     detailed: bool,
@@ -212,25 +224,27 @@ async fn process_additions(
                 }
             }
 
-            if !labels_to_segment.is_empty() {
-                match word_client.segment_batch(labels_to_segment).await {
-                    Ok(segments) => {
-                        let token_map: std::collections::HashMap<&str, (&Vec<String>, &Vec<String>)> =
-                            segments.iter().map(|(label, seg, kw)| (label.as_str(), (seg, kw))).collect();
-                        for normalized in valid_domains.iter_mut() {
-                            if let Some((seg, kw)) = token_map.get(normalized.label.as_str()) {
-                                let mut tokens = (*seg).clone();
-                                for keyword in kw.iter() {
-                                    if !tokens.contains(keyword) {
-                                        tokens.push(keyword.clone());
+            if let Some(ref wc) = word_client {
+                if !labels_to_segment.is_empty() {
+                    match wc.segment_batch(labels_to_segment).await {
+                        Ok(segments) => {
+                            let token_map: std::collections::HashMap<&str, (&Vec<String>, &Vec<String>)> =
+                                segments.iter().map(|(label, seg, kw)| (label.as_str(), (seg, kw))).collect();
+                            for normalized in valid_domains.iter_mut() {
+                                if let Some((seg, kw)) = token_map.get(normalized.label.as_str()) {
+                                    let mut tokens = (*seg).clone();
+                                    for keyword in kw.iter() {
+                                        if !tokens.contains(keyword) {
+                                            tokens.push(keyword.clone());
+                                        }
                                     }
+                                    normalized.tokens = tokens;
                                 }
-                                normalized.tokens = tokens;
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Word segmentation failed");
+                        Err(e) => {
+                            warn!(error = %e, "Word segmentation failed");
+                        }
                     }
                 }
             }
@@ -279,25 +293,27 @@ async fn process_additions(
                 }
             }
 
-            if !labels_to_segment.is_empty() {
-                match word_client.segment_batch(labels_to_segment).await {
-                    Ok(segments) => {
-                        let token_map: std::collections::HashMap<&str, (&Vec<String>, &Vec<String>)> =
-                            segments.iter().map(|(label, seg, kw)| (label.as_str(), (seg, kw))).collect();
-                        for normalized in valid_domains.iter_mut() {
-                            if let Some((seg, kw)) = token_map.get(normalized.label.as_str()) {
-                                let mut tokens = (*seg).clone();
-                                for keyword in kw.iter() {
-                                    if !tokens.contains(keyword) {
-                                        tokens.push(keyword.clone());
+            if let Some(ref wc) = word_client {
+                if !labels_to_segment.is_empty() {
+                    match wc.segment_batch(labels_to_segment).await {
+                        Ok(segments) => {
+                            let token_map: std::collections::HashMap<&str, (&Vec<String>, &Vec<String>)> =
+                                segments.iter().map(|(label, seg, kw)| (label.as_str(), (seg, kw))).collect();
+                            for normalized in valid_domains.iter_mut() {
+                                if let Some((seg, kw)) = token_map.get(normalized.label.as_str()) {
+                                    let mut tokens = (*seg).clone();
+                                    for keyword in kw.iter() {
+                                        if !tokens.contains(keyword) {
+                                            tokens.push(keyword.clone());
+                                        }
                                     }
+                                    normalized.tokens = tokens;
                                 }
-                                normalized.tokens = tokens;
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Word segmentation failed, using empty tokens");
+                        Err(e) => {
+                            warn!(error = %e, "Word segmentation failed, using empty tokens");
+                        }
                     }
                 }
             }

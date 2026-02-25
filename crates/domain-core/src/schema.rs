@@ -1,7 +1,7 @@
 use crate::domain::NormalizedDomain;
 use tantivy::schema::{
-    Facet, FacetOptions, Field, NumericOptions, Schema, TextFieldIndexing, TextOptions,
-    STORED, STRING,
+    Facet, FacetOptions, Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing,
+    TextOptions, STORED, STRING,
 };
 use tantivy::TantivyDocument;
 
@@ -17,6 +17,9 @@ pub struct DomainSchema {
     pub len: Field,
     pub has_hyphen: Field,
     pub label: Field,
+
+    // Trigram field for substring search (may not be present in older indexes)
+    pub label_ngrams: Option<Field>,
 
     // Detailed fields (may not be present in older indexes)
     pub country: Option<Field>,
@@ -43,7 +46,7 @@ impl DomainSchema {
             .set_indexing_options(
                 TextFieldIndexing::default()
                     .set_tokenizer("default")
-                    .set_index_option(tantivy::schema::IndexRecordOption::WithFreqsAndPositions),
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
             )
             .set_stored();
         let tokens = schema_builder.add_text_field("tokens", text_options);
@@ -68,10 +71,19 @@ impl DomainSchema {
             .set_indexing_options(
                 TextFieldIndexing::default()
                     .set_tokenizer("default")
-                    .set_index_option(tantivy::schema::IndexRecordOption::WithFreqs),
+                    .set_index_option(IndexRecordOption::WithFreqs),
             )
             .set_stored();
         let label = schema_builder.add_text_field("label", label_options);
+
+        // label_ngrams: TEXT (trigram-tokenized, NOT stored) - for substring search
+        // Uses "ngram3" tokenizer that must be registered with the index
+        let ngram_options = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("ngram3")
+                .set_index_option(IndexRecordOption::WithFreqs),
+        );
+        let label_ngrams = schema_builder.add_text_field("label_ngrams", ngram_options);
 
         // Detailed fields - filterable (STRING for exact match)
         let country = schema_builder.add_text_field("country", STRING | STORED);
@@ -94,6 +106,7 @@ impl DomainSchema {
             len,
             has_hyphen,
             label,
+            label_ngrams: Some(label_ngrams),
             country: Some(country),
             web_server: Some(web_server),
             ip: Some(ip),
@@ -117,6 +130,7 @@ impl DomainSchema {
             len: schema.get_field("len").expect("missing len field"),
             has_hyphen: schema.get_field("has_hyphen").expect("missing has_hyphen field"),
             label: schema.get_field("label").expect("missing label field"),
+            label_ngrams: schema.get_field("label_ngrams").ok(),
             country: schema.get_field("country").ok(),
             web_server: schema.get_field("web_server").ok(),
             ip: schema.get_field("ip").ok(),
@@ -150,6 +164,11 @@ impl DomainSchema {
 
         // label
         doc.add_text(self.label, &domain.label);
+
+        // label_ngrams - same raw label, trigram-tokenized by "ngram3" tokenizer
+        if let Some(field) = self.label_ngrams {
+            doc.add_text(field, &domain.label);
+        }
 
         // Detailed fields (only added if present in schema and domain has detailed data)
         if let Some(ref detail) = domain.detailed {
@@ -202,6 +221,7 @@ mod tests {
         assert!(schema.schema.get_field("len").is_ok());
         assert!(schema.schema.get_field("has_hyphen").is_ok());
         assert!(schema.schema.get_field("label").is_ok());
+        assert!(schema.schema.get_field("label_ngrams").is_ok());
 
         // Verify detailed fields exist
         assert!(schema.schema.get_field("country").is_ok());
@@ -219,6 +239,7 @@ mod tests {
         let loaded = DomainSchema::from_existing(&original.schema);
 
         // All fields should be present
+        assert!(loaded.label_ngrams.is_some());
         assert!(loaded.country.is_some());
         assert!(loaded.web_server.is_some());
         assert!(loaded.ip.is_some());
