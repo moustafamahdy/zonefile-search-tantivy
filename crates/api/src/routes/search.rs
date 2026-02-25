@@ -8,6 +8,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, TermQuery};
@@ -169,33 +170,24 @@ async fn execute_search(
     })?;
     let searcher = reader.searcher();
 
-    // Smart candidate limit based on query complexity
-    let base_limit = if num_query_tokens == 1 {
-        params.limit as usize * 20
-    } else {
-        params.limit as usize * 100
-    };
+    let target_results = params.limit as usize;
 
-    let has_post_filters = tld_filter.is_some()
-        || country_filter.is_some()
-        || web_server_filter.is_some();
-
-    let candidate_limit = if has_post_filters {
-        base_limit.min(50000)
+    // --- Pass 1: OR query across all tokens ---
+    let pass1_limit = if num_query_tokens == 1 {
+        (target_results * 20).min(10000)
     } else {
-        base_limit.min(20000)
+        (target_results * 50).min(10000)
     };
 
     let top_docs = searcher
-        .search(&query, &TopDocs::with_limit(candidate_limit))
+        .search(&query, &TopDocs::with_limit(pass1_limit))
         .map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Search error: {}", e))
         })?;
 
-    // Rescore candidates by match count
-    let mut ranked_results: Vec<RankedResult> = Vec::with_capacity(candidate_limit);
+    let mut ranked_results: Vec<RankedResult> = Vec::with_capacity(pass1_limit);
+    let mut seen_domains: HashSet<String> = HashSet::new();
     let mut perfect_matches = 0usize;
-    let target_results = params.limit as usize;
 
     for (bm25_score, doc_address) in top_docs {
         let doc = searcher.doc(doc_address).map_err(|e| {
@@ -204,8 +196,7 @@ async fn execute_search(
 
         let domain_result = extract_domain_result(&state.schema, &doc);
 
-        // Count how many query tokens appear in the domain's tokens
-        let doc_tokens: std::collections::HashSet<&str> =
+        let doc_tokens: HashSet<&str> =
             domain_result.tokens.iter().map(|s| s.as_str()).collect();
 
         let match_count = query_tokens
@@ -222,27 +213,22 @@ async fn execute_search(
 
         let total_match = match_count + label_match_count;
 
-        // Filter by minimum match count (token matches + label matches)
         if total_match < min_match {
             continue;
         }
 
-        // Filter by TLD if specified
+        // Apply post-filters
         if let Some(ref tld) = tld_filter {
             if &domain_result.tld != tld {
                 continue;
             }
         }
-
-        // Filter by country if specified
         if let Some(ref country) = country_filter {
             match &domain_result.country {
                 Some(dc) if dc.to_lowercase() == *country => {}
                 _ => continue,
             }
         }
-
-        // Filter by web_server if specified (contains match)
         if let Some(ref ws) = web_server_filter {
             match &domain_result.web_server {
                 Some(dws) if dws.to_lowercase().contains(ws.as_str()) => {}
@@ -250,11 +236,11 @@ async fn execute_search(
             }
         }
 
-        // Track perfect matches for early termination
         if total_match == num_query_tokens {
             perfect_matches += 1;
         }
 
+        seen_domains.insert(domain_result.domain.clone());
         ranked_results.push(RankedResult {
             domain: domain_result,
             match_count,
@@ -262,8 +248,7 @@ async fn execute_search(
             bm25_score,
         });
 
-        // Early termination: stop if we have enough perfect matches,
-        // or if we have plenty of results and enough to fill the limit from top tiers
+        // Early termination if we have enough perfect matches
         if perfect_matches >= target_results * 2
             || (perfect_matches >= target_results && ranked_results.len() >= target_results * 3)
         {
@@ -271,17 +256,96 @@ async fn execute_search(
         }
     }
 
+    // --- Pass 2: Targeted label substring search ---
+    // Only for multi-token queries when pass 1 didn't find enough high-quality results
+    if num_query_tokens > 1 && perfect_matches < target_results {
+        let pass2_limit = (target_results * 20).min(5000);
+
+        for (i, token) in query_tokens.iter().enumerate() {
+            // Other tokens that need to appear as label substrings
+            let other_tokens: Vec<&str> = query_tokens
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, t)| t.as_str())
+                .collect();
+
+            let term = Term::from_field_text(state.schema.tokens, token);
+            let term_query = TermQuery::new(term, IndexRecordOption::WithFreqs);
+
+            let pass2_docs = searcher
+                .search(&term_query, &TopDocs::with_limit(pass2_limit))
+                .map_err(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Search error: {}", e))
+                })?;
+
+            for (bm25_score, doc_address) in pass2_docs {
+                let doc = searcher.doc(doc_address).map_err(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Doc error: {}", e))
+                })?;
+
+                let domain_result = extract_domain_result(&state.schema, &doc);
+
+                // Skip already seen domains
+                if seen_domains.contains(&domain_result.domain) {
+                    continue;
+                }
+
+                // Check if other tokens appear as substrings in the label
+                let label_lower = domain_result.label.to_lowercase();
+                let label_match_count = other_tokens
+                    .iter()
+                    .filter(|t| label_lower.contains(*t))
+                    .count();
+
+                if label_match_count == 0 {
+                    continue;
+                }
+
+                // Apply post-filters
+                if let Some(ref tld) = tld_filter {
+                    if &domain_result.tld != tld {
+                        continue;
+                    }
+                }
+                if let Some(ref country) = country_filter {
+                    match &domain_result.country {
+                        Some(dc) if dc.to_lowercase() == *country => {}
+                        _ => continue,
+                    }
+                }
+                if let Some(ref ws) = web_server_filter {
+                    match &domain_result.web_server {
+                        Some(dws) if dws.to_lowercase().contains(ws.as_str()) => {}
+                        _ => continue,
+                    }
+                }
+
+                seen_domains.insert(domain_result.domain.clone());
+                ranked_results.push(RankedResult {
+                    domain: domain_result,
+                    match_count: 1, // matched the one token
+                    label_match_count,
+                    bm25_score,
+                });
+            }
+        }
+    }
+
     let total_candidates = ranked_results.len();
 
     // Sort by: match_count DESC, label_match_count DESC, has_hyphen ASC, length ASC, bm25 DESC
-    // Token matches rank above label substring matches
     ranked_results.sort_by(|a, b| {
         b.match_count
             .cmp(&a.match_count)
             .then_with(|| b.label_match_count.cmp(&a.label_match_count))
             .then_with(|| a.domain.has_hyphen.cmp(&b.domain.has_hyphen))
             .then_with(|| a.domain.length.cmp(&b.domain.length))
-            .then_with(|| b.bm25_score.partial_cmp(&a.bm25_score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.bm25_score
+                    .partial_cmp(&a.bm25_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     let limit = params.limit as usize;
