@@ -180,9 +180,9 @@ async fn execute_search(
         || web_server_filter.is_some();
 
     let candidate_limit = if has_post_filters {
-        base_limit.min(5000) // More candidates when filtering
+        base_limit.min(50000) // More candidates when filtering
     } else {
-        base_limit.min(1000)
+        base_limit.min(10000)
     };
 
     let top_docs = searcher
