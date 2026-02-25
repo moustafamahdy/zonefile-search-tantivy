@@ -181,9 +181,9 @@ async fn execute_search(
         || web_server_filter.is_some();
 
     let candidate_limit = if has_post_filters {
-        base_limit.min(100000) // More candidates when filtering
-    } else {
         base_limit.min(50000)
+    } else {
+        base_limit.min(20000)
     };
 
     let top_docs = searcher
@@ -262,8 +262,11 @@ async fn execute_search(
             bm25_score,
         });
 
-        // Early termination: if we have enough perfect matches, stop
-        if perfect_matches >= target_results * 2 {
+        // Early termination: stop if we have enough perfect matches
+        // or enough total qualifying results
+        if perfect_matches >= target_results * 2
+            || ranked_results.len() >= target_results * 5
+        {
             break;
         }
     }
