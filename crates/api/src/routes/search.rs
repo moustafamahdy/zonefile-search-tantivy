@@ -262,8 +262,11 @@ async fn execute_search(
             bm25_score,
         });
 
-        // Early termination: stop if we have enough perfect matches
-        if perfect_matches >= target_results * 2 {
+        // Early termination: stop if we have enough perfect matches,
+        // or if we have plenty of results and enough to fill the limit from top tiers
+        if perfect_matches >= target_results * 2
+            || (perfect_matches >= target_results && ranked_results.len() >= target_results * 3)
+        {
             break;
         }
     }
