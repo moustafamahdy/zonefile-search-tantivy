@@ -257,12 +257,14 @@ async fn execute_search(
     }
 
     // --- Pass 2: Targeted label substring search ---
-    // Only for multi-token queries when pass 1 didn't find enough high-quality results
+    // Only for multi-token queries when pass 1 didn't find enough high-quality results.
+    // For each query token, search individually and check if OTHER tokens appear as
+    // substrings in the domain label. Uses lightweight field extraction to skip
+    // already-seen domains and non-matching labels cheaply.
     if num_query_tokens > 1 && perfect_matches < target_results {
-        let pass2_limit = (target_results * 20).min(5000);
+        let pass2_limit = 20000;
 
         for (i, token) in query_tokens.iter().enumerate() {
-            // Other tokens that need to appear as label substrings
             let other_tokens: Vec<&str> = query_tokens
                 .iter()
                 .enumerate()
@@ -280,19 +282,27 @@ async fn execute_search(
                 })?;
 
             for (bm25_score, doc_address) in pass2_docs {
-                let doc = searcher.doc(doc_address).map_err(|e| {
+                let doc: tantivy::TantivyDocument = searcher.doc(doc_address).map_err(|e| {
                     (StatusCode::INTERNAL_SERVER_ERROR, format!("Doc error: {}", e))
                 })?;
 
-                let domain_result = extract_domain_result(&state.schema, &doc);
+                // Lightweight check: extract just domain name and label first
+                use tantivy::schema::Value;
+                let domain_name = doc
+                    .get_first(state.schema.domain_exact)
+                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
+                    .unwrap_or("");
 
-                // Skip already seen domains
-                if seen_domains.contains(&domain_result.domain) {
+                if seen_domains.contains(domain_name) {
                     continue;
                 }
 
-                // Check if other tokens appear as substrings in the label
-                let label_lower = domain_result.label.to_lowercase();
+                let label = doc
+                    .get_first(state.schema.label)
+                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_str())
+                    .unwrap_or("");
+
+                let label_lower = label.to_lowercase();
                 let label_match_count = other_tokens
                     .iter()
                     .filter(|t| label_lower.contains(*t))
@@ -301,6 +311,9 @@ async fn execute_search(
                 if label_match_count == 0 {
                     continue;
                 }
+
+                // Full extraction only for matching candidates
+                let domain_result = extract_domain_result(&state.schema, &doc);
 
                 // Apply post-filters
                 if let Some(ref tld) = tld_filter {
@@ -324,7 +337,7 @@ async fn execute_search(
                 seen_domains.insert(domain_result.domain.clone());
                 ranked_results.push(RankedResult {
                     domain: domain_result,
-                    match_count: 1, // matched the one token
+                    match_count: 1,
                     label_match_count,
                     bm25_score,
                 });
