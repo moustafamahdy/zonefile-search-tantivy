@@ -173,7 +173,7 @@ async fn execute_search(
     let base_limit = if num_query_tokens == 1 {
         params.limit as usize * 20
     } else {
-        params.limit as usize * 50
+        params.limit as usize * 100
     };
 
     let has_post_filters = tld_filter.is_some()
@@ -181,9 +181,9 @@ async fn execute_search(
         || web_server_filter.is_some();
 
     let candidate_limit = if has_post_filters {
-        base_limit.min(50000) // More candidates when filtering
+        base_limit.min(100000) // More candidates when filtering
     } else {
-        base_limit.min(10000)
+        base_limit.min(50000)
     };
 
     let top_docs = searcher
