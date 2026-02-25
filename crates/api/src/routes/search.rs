@@ -263,10 +263,7 @@ async fn execute_search(
         });
 
         // Early termination: stop if we have enough perfect matches
-        // or enough total qualifying results
-        if perfect_matches >= target_results * 2
-            || ranked_results.len() >= target_results * 5
-        {
+        if perfect_matches >= target_results * 2 {
             break;
         }
     }
