@@ -3,7 +3,10 @@ use crate::routes::exact::DomainResult;
 /// A search result with ranking information
 pub struct RankedResult {
     pub domain: DomainResult,
+    /// Number of query tokens matched exactly in indexed tokens
     pub match_count: usize,
+    /// Number of query tokens found as substrings in the domain label
+    pub label_match_count: usize,
     pub bm25_score: f32,
 }
 
@@ -51,6 +54,7 @@ mod tests {
                 seo_rank: None,
             },
             match_count,
+            label_match_count: 0,
             bm25_score: bm25,
         }
     }

@@ -53,6 +53,7 @@ pub struct SearchResult {
     #[serde(flatten)]
     pub domain: DomainResult,
     pub match_count: usize,
+    pub label_match_count: usize,
     pub score: f32,
 }
 
@@ -212,8 +213,17 @@ async fn execute_search(
             .filter(|qt| doc_tokens.contains(qt.as_str()))
             .count();
 
-        // Filter by minimum match count
-        if match_count < min_match {
+        // Count query tokens found as substrings in the domain label (but not in tokens)
+        let label_lower = domain_result.label.to_lowercase();
+        let label_match_count = query_tokens
+            .iter()
+            .filter(|qt| !doc_tokens.contains(qt.as_str()) && label_lower.contains(qt.as_str()))
+            .count();
+
+        let total_match = match_count + label_match_count;
+
+        // Filter by minimum match count (token matches + label matches)
+        if total_match < min_match {
             continue;
         }
 
@@ -241,13 +251,14 @@ async fn execute_search(
         }
 
         // Track perfect matches for early termination
-        if match_count == num_query_tokens {
+        if total_match == num_query_tokens {
             perfect_matches += 1;
         }
 
         ranked_results.push(RankedResult {
             domain: domain_result,
             match_count,
+            label_match_count,
             bm25_score,
         });
 
@@ -259,10 +270,12 @@ async fn execute_search(
 
     let total_candidates = ranked_results.len();
 
-    // Sort all results by: match_count DESC, has_hyphen ASC (non-hyphen first), length ASC, bm25 DESC
+    // Sort by: match_count DESC, label_match_count DESC, has_hyphen ASC, length ASC, bm25 DESC
+    // Token matches rank above label substring matches
     ranked_results.sort_by(|a, b| {
         b.match_count
             .cmp(&a.match_count)
+            .then_with(|| b.label_match_count.cmp(&a.label_match_count))
             .then_with(|| a.domain.has_hyphen.cmp(&b.domain.has_hyphen))
             .then_with(|| a.domain.length.cmp(&b.domain.length))
             .then_with(|| b.bm25_score.partial_cmp(&a.bm25_score).unwrap_or(std::cmp::Ordering::Equal))
@@ -275,6 +288,7 @@ async fn execute_search(
         .map(|r| SearchResult {
             domain: r.domain,
             match_count: r.match_count,
+            label_match_count: r.label_match_count,
             score: r.bm25_score,
         })
         .collect();
