@@ -6,6 +6,7 @@ members = [
     "crates/zonefile-client",
     "crates/indexer",
     "crates/api",
+    "crates/metadata-fetcher",
 ]
 
 [workspace.package]
@@ -64,6 +65,22 @@ indicatif = { version = "0.17", features = ["tokio"] }
 # Compression
 async_zip = { version = "0.0.17", features = ["tokio", "tokio-fs", "deflate"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+
+# XML parsing for sitemaps
+quick-xml = { version = "0.37", features = ["async-tokio"] }
+
+# robots.txt parsing
+texting_robots = "0.2"
+
+# SQLite for checkpoint/resume storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-rusqlite = "0.6"
+
+# Async DNS resolver
+hickory-resolver = "0.24"
+
+# Randomization
+rand = "0.8"
 
 # Testing
 wiremock = "0.6"

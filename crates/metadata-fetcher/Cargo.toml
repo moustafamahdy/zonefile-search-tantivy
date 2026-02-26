@@ -1,0 +1,57 @@
+[package]
+name = "metadata-fetcher"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "domain-metadata"
+path = "src/main.rs"
+
+[dependencies]
+domain-core = { path = "../domain-core" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+
+# HTTP
+reqwest = { workspace = true, features = ["rustls-tls"] }
+
+# DNS
+hickory-resolver = { workspace = true }
+
+# XML parsing (sitemaps)
+quick-xml = { workspace = true }
+
+# robots.txt parsing
+texting_robots = { workspace = true }
+
+# Storage
+rusqlite = { workspace = true }
+tokio-rusqlite = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Configuration
+dotenvy = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Logging + errors
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Progress
+indicatif = { workspace = true }
+
+# Tantivy (for export + import)
+tantivy = { workspace = true }
+
+# Randomization
+rand = { workspace = true }
