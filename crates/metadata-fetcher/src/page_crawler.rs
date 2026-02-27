@@ -5,14 +5,18 @@ use crate::progress::CrawlProgress;
 use crate::store::MetadataStore;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
-/// Run the page metadata crawl over a list of domains.
+/// Run the page metadata crawl, streaming domains from a file to avoid loading
+/// all 314M domains into memory (~12GB). Reads line by line, feeds into a
+/// bounded concurrent pipeline.
 pub async fn run_page_crawl(
-    domains: Vec<String>,
+    domains_file: &Path,
     config: &FetcherConfig,
     store: MetadataStore,
     resume: bool,
@@ -22,15 +26,8 @@ pub async fn run_page_crawl(
     let sem = Arc::new(Semaphore::new(config.page_concurrency));
     let store = Arc::new(store);
 
-    // Shuffle domains to distribute load
-    let mut domains = domains;
-    {
-        use rand::seq::SliceRandom;
-        let mut rng = rand::thread_rng();
-        domains.shuffle(&mut rng);
-    }
-
-    let total = domains.len() as u64;
+    // Count total lines for progress bar (fast: just count newlines)
+    let total = count_lines(domains_file).await?;
     info!(total, concurrency = config.page_concurrency, "Starting page metadata crawl");
 
     let progress = CrawlProgress::new(total);
@@ -79,35 +76,65 @@ pub async fn run_page_crawl(
         done
     });
 
-    // Crawl all domains with bounded concurrency
-    stream::iter(domains)
-        .for_each_concurrent(config.page_concurrency, |domain| {
-            let client = Arc::clone(&client);
-            let sem = Arc::clone(&sem);
-            let store_check = Arc::clone(&store);
-            let tx = tx.clone();
+    // Stream domains from file in chunks to feed into concurrent pipeline.
+    // We read in batches of 100k lines to keep memory bounded while still
+    // allowing for_each_concurrent to have work available.
+    let file = tokio::fs::File::open(domains_file).await?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
 
-            async move {
-                // Resume: skip already-crawled domains
-                if resume {
-                    match store_check.is_page_done(&domain).await {
-                        Ok(true) => return,
-                        Ok(false) => {}
-                        Err(e) => {
-                            warn!(domain = &domain, error = %e, "Failed to check page done status");
-                        }
+    let chunk_size = 100_000usize;
+    let mut chunk: Vec<String> = Vec::with_capacity(chunk_size);
+
+    loop {
+        chunk.clear();
+        for _ in 0..chunk_size {
+            match lines.next_line().await? {
+                Some(line) => {
+                    let trimmed = line.trim().to_string();
+                    if !trimmed.is_empty() {
+                        chunk.push(trimmed);
                     }
                 }
-
-                let _permit = sem.acquire().await.expect("semaphore closed");
-                let result = fetch_page_metadata(&client, &domain, max_page_bytes).await;
-
-                if let Err(e) = tx.send(result).await {
-                    warn!(domain = &domain, error = %e, "Failed to send page result");
-                }
+                None => break,
             }
-        })
-        .await;
+        }
+
+        if chunk.is_empty() {
+            break;
+        }
+
+        let domains_batch = std::mem::replace(&mut chunk, Vec::with_capacity(chunk_size));
+
+        stream::iter(domains_batch)
+            .for_each_concurrent(config.page_concurrency, |domain| {
+                let client = Arc::clone(&client);
+                let sem = Arc::clone(&sem);
+                let store_check = Arc::clone(&store);
+                let tx = tx.clone();
+
+                async move {
+                    // Resume: skip already-crawled domains
+                    if resume {
+                        match store_check.is_page_done(&domain).await {
+                            Ok(true) => return,
+                            Ok(false) => {}
+                            Err(e) => {
+                                warn!(domain = &domain, error = %e, "Failed to check page done status");
+                            }
+                        }
+                    }
+
+                    let _permit = sem.acquire().await.expect("semaphore closed");
+                    let result = fetch_page_metadata(&client, &domain, max_page_bytes).await;
+
+                    if let Err(e) = tx.send(result).await {
+                        warn!(domain = &domain, error = %e, "Failed to send page result");
+                    }
+                }
+            })
+            .await;
+    }
 
     drop(tx);
 
@@ -115,6 +142,18 @@ pub async fn run_page_crawl(
     info!(done, "Page metadata crawl complete");
 
     Ok(())
+}
+
+/// Count lines in a file efficiently (for progress bar)
+async fn count_lines(path: &Path) -> anyhow::Result<u64> {
+    let file = tokio::fs::File::open(path).await?;
+    let reader = BufReader::with_capacity(256 * 1024, file);
+    let mut lines = reader.lines();
+    let mut count: u64 = 0;
+    while lines.next_line().await?.is_some() {
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn build_page_client(config: &FetcherConfig) -> anyhow::Result<Client> {

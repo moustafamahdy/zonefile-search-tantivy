@@ -223,18 +223,17 @@ async fn main() -> Result<()> {
 
             let store = MetadataStore::open(&config.db_path).await?;
 
-            let domains = if let Some(ref file) = domains_file {
-                info!(path = ?file, "Loading domains from file");
-                load_domains_from_file(file).await?
+            let file_path = if let Some(ref file) = domains_file {
+                file.clone()
             } else {
                 info!("Exporting domains from Tantivy index");
                 let export_path = config.db_path.with_extension("domains.txt");
                 exporter::export_domains(&config.index_path, &export_path).await?;
-                load_domains_from_file(&export_path).await?
+                export_path
             };
 
-            info!(count = domains.len(), "Domains loaded for page fetch");
-            page_crawler::run_page_crawl(domains, &config, store, resume).await?;
+            info!(path = ?file_path, "Streaming domains from file");
+            page_crawler::run_page_crawl(&file_path, &config, store, resume).await?;
         }
 
         Commands::PageStats { db } => {
