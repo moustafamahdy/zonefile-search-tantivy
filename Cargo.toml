@@ -82,6 +82,9 @@ hickory-resolver = "0.24"
 # Randomization
 rand = "0.8"
 
+# HTML parsing
+scraper = "0.22"
+
 # Testing
 wiremock = "0.6"
 

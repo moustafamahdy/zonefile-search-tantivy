@@ -26,6 +26,15 @@ pub struct FetcherConfig {
 
     /// Commit interval for Tantivy import
     pub import_commit_interval: usize,
+
+    /// Maximum concurrent page fetch requests
+    pub page_concurrency: usize,
+
+    /// Maximum HTML body size in bytes for page fetch
+    pub max_page_bytes: usize,
+
+    /// Per-request timeout for page fetch in seconds
+    pub page_request_timeout_secs: u64,
 }
 
 impl FetcherConfig {
@@ -70,6 +79,21 @@ impl FetcherConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500_000),
+
+            page_concurrency: std::env::var("PAGE_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2000),
+
+            max_page_bytes: std::env::var("PAGE_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100 * 1024), // 100KB
+
+            page_request_timeout_secs: std::env::var("PAGE_REQUEST_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15),
         })
     }
 }

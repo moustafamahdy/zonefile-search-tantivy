@@ -55,3 +55,6 @@ tantivy = { workspace = true }
 
 # Randomization
 rand = { workspace = true }
+
+# HTML parsing
+scraper = { workspace = true }

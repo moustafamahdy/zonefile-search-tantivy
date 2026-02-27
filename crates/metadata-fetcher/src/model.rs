@@ -51,6 +51,26 @@ pub fn detect_cms_from_disallow_paths(paths: &[String]) -> Option<String> {
     None
 }
 
+/// Result of fetching page metadata for a single domain
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageMetadataResult {
+    pub domain: String,
+    pub http_status: u16,
+    pub page_title: Option<String>,
+    pub meta_description: Option<String>,
+    pub og_title: Option<String>,
+    pub og_description: Option<String>,
+    pub og_image: Option<String>,
+    pub canonical_url: Option<String>,
+    pub language: Option<String>,
+    pub generator: Option<String>,
+    pub snippet: Option<String>,
+    pub content_type: Option<String>,
+    pub fetched_at: i64,
+    pub source: String,
+    pub error: Option<String>,
+}
+
 /// Detect site category from sitemap URL samples
 pub fn detect_site_category(sample_urls: &[String]) -> Option<String> {
     let combined: String = sample_urls.join("\n").to_lowercase();

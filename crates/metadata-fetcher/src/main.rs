@@ -9,8 +9,11 @@ mod crawler;
 mod error;
 mod exporter;
 mod fetcher;
+mod html_parser;
 mod importer;
 mod model;
+mod page_crawler;
+mod page_fetcher;
 mod progress;
 mod robots;
 mod sitemap;
@@ -79,6 +82,32 @@ enum Commands {
         /// Path to the Tantivy index
         #[arg(short, long)]
         index: Option<PathBuf>,
+    },
+
+    /// Fetch page metadata (title, description, OG tags) for all domains
+    FetchPages {
+        /// Path to pre-exported domain list (one domain per line)
+        #[arg(long)]
+        domains_file: Option<PathBuf>,
+
+        /// Path to SQLite results database
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Resume from previous crawl (skip already-done domains)
+        #[arg(long, default_value = "true")]
+        resume: bool,
+
+        /// Maximum concurrent requests
+        #[arg(long)]
+        concurrency: Option<usize>,
+    },
+
+    /// Show page metadata crawl statistics
+    PageStats {
+        /// Path to SQLite results database
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
 }
 
@@ -178,9 +207,85 @@ async fn main() -> Result<()> {
             let store = MetadataStore::open(&config.db_path).await?;
             importer::import_metadata(&config.index_path, &config, &store).await?;
         }
+
+        Commands::FetchPages {
+            domains_file,
+            db,
+            resume,
+            concurrency,
+        } => {
+            if let Some(db) = db {
+                config.db_path = db;
+            }
+            if let Some(c) = concurrency {
+                config.page_concurrency = c;
+            }
+
+            let store = MetadataStore::open(&config.db_path).await?;
+
+            let domains = if let Some(ref file) = domains_file {
+                info!(path = ?file, "Loading domains from file");
+                load_domains_from_file(file).await?
+            } else {
+                info!("Exporting domains from Tantivy index");
+                let export_path = config.db_path.with_extension("domains.txt");
+                exporter::export_domains(&config.index_path, &export_path).await?;
+                load_domains_from_file(&export_path).await?
+            };
+
+            info!(count = domains.len(), "Domains loaded for page fetch");
+            page_crawler::run_page_crawl(domains, &config, store, resume).await?;
+        }
+
+        Commands::PageStats { db } => {
+            if let Some(db) = db {
+                config.db_path = db;
+            }
+            let store = MetadataStore::open(&config.db_path).await?;
+            let stats = store.read_page_stats().await?;
+
+            println!("=== Page Metadata Statistics ===");
+            println!("Total fetched:     {}", stats.total);
+            println!("With title:        {} ({:.1}%)",
+                stats.with_title,
+                pct(stats.with_title, stats.total),
+            );
+            println!("With description:  {} ({:.1}%)",
+                stats.with_description,
+                pct(stats.with_description, stats.total),
+            );
+            println!("With OG tags:      {} ({:.1}%)",
+                stats.with_og,
+                pct(stats.with_og, stats.total),
+            );
+            println!("With snippet:      {} ({:.1}%)",
+                stats.with_snippet,
+                pct(stats.with_snippet, stats.total),
+            );
+            println!("Errors:            {} ({:.1}%)",
+                stats.errors,
+                pct(stats.errors, stats.total),
+            );
+            if !stats.source_counts.is_empty() {
+                println!("\n=== Sources ===");
+                for (source, count) in &stats.source_counts {
+                    println!("  {:<15} {}", source, count);
+                }
+            }
+            if !stats.lang_counts.is_empty() {
+                println!("\n=== Top Languages ===");
+                for (lang, count) in &stats.lang_counts {
+                    println!("  {:<10} {}", lang, count);
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn pct(part: i64, total: i64) -> f64 {
+    if total > 0 { part as f64 / total as f64 * 100.0 } else { 0.0 }
 }
 
 async fn load_domains_from_file(path: &PathBuf) -> Result<Vec<String>> {

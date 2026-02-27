@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::model::DomainMetadataResult;
+use crate::model::{DomainMetadataResult, PageMetadataResult};
 use std::path::Path;
 use tokio_rusqlite::Connection;
 use tracing::info;
@@ -50,6 +50,26 @@ impl MetadataStore {
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_fetched_at ON results(fetched_at);
+
+                CREATE TABLE IF NOT EXISTS page_metadata (
+                    domain           TEXT PRIMARY KEY,
+                    http_status      INTEGER NOT NULL DEFAULT 0,
+                    page_title       TEXT,
+                    meta_description TEXT,
+                    og_title         TEXT,
+                    og_description   TEXT,
+                    og_image         TEXT,
+                    canonical_url    TEXT,
+                    language         TEXT,
+                    generator        TEXT,
+                    snippet          TEXT,
+                    content_type     TEXT,
+                    fetched_at       INTEGER NOT NULL,
+                    source           TEXT NOT NULL DEFAULT 'direct',
+                    error            TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_page_fetched ON page_metadata(fetched_at);
+                CREATE INDEX IF NOT EXISTS idx_page_source ON page_metadata(source);
             ",
             )?)
         })
@@ -209,6 +229,165 @@ impl MetadataStore {
             .await?;
         Ok(count as u64)
     }
+
+    // --- Page metadata methods ---
+
+    pub async fn is_page_done(&self, domain: &str) -> Result<bool> {
+        let domain = domain.to_string();
+        let count: i64 = self
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM page_metadata WHERE domain = ?1",
+                    rusqlite::params![domain],
+                    |row| row.get(0),
+                )?)
+            })
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn upsert_page_batch(&self, results: Vec<PageMetadataResult>) -> Result<()> {
+        self.conn
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "INSERT OR REPLACE INTO page_metadata (
+                        domain, http_status, page_title, meta_description,
+                        og_title, og_description, og_image, canonical_url,
+                        language, generator, snippet, content_type,
+                        fetched_at, source, error
+                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                    )?;
+                    for r in &results {
+                        stmt.execute(rusqlite::params![
+                            r.domain,
+                            r.http_status as i64,
+                            r.page_title,
+                            r.meta_description,
+                            r.og_title,
+                            r.og_description,
+                            r.og_image,
+                            r.canonical_url,
+                            r.language,
+                            r.generator,
+                            r.snippet,
+                            r.content_type,
+                            r.fetched_at,
+                            r.source,
+                            r.error,
+                        ])?;
+                    }
+                }
+                Ok(tx.commit()?)
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn read_page_stats(&self) -> Result<PageCrawlStats> {
+        let stats = self
+            .conn
+            .call(|conn| {
+                let total: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM page_metadata", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let with_title: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM page_metadata WHERE page_title IS NOT NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let with_description: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM page_metadata WHERE meta_description IS NOT NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let with_og: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM page_metadata WHERE og_title IS NOT NULL OR og_description IS NOT NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let with_snippet: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM page_metadata WHERE snippet IS NOT NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let errors: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM page_metadata WHERE error IS NOT NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+
+                let mut lang_counts: Vec<(String, i64)> = Vec::new();
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT language, COUNT(*) as cnt FROM page_metadata WHERE language IS NOT NULL GROUP BY language ORDER BY cnt DESC LIMIT 20",
+                ) {
+                    if let Ok(rows) = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
+                        for row in rows.flatten() {
+                            lang_counts.push(row);
+                        }
+                    }
+                }
+
+                let mut source_counts: Vec<(String, i64)> = Vec::new();
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT source, COUNT(*) as cnt FROM page_metadata GROUP BY source ORDER BY cnt DESC",
+                ) {
+                    if let Ok(rows) = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
+                        for row in rows.flatten() {
+                            source_counts.push(row);
+                        }
+                    }
+                }
+
+                Ok(PageCrawlStats {
+                    total,
+                    with_title,
+                    with_description,
+                    with_og,
+                    with_snippet,
+                    errors,
+                    lang_counts,
+                    source_counts,
+                })
+            })
+            .await?;
+        Ok(stats)
+    }
+
+    pub async fn count_pages_done(&self) -> Result<u64> {
+        let count: i64 = self
+            .conn
+            .call(|conn| {
+                Ok(conn
+                    .query_row("SELECT COUNT(*) FROM page_metadata", [], |r| r.get(0))?)
+            })
+            .await?;
+        Ok(count as u64)
+    }
+}
+
+#[derive(Debug)]
+pub struct PageCrawlStats {
+    pub total: i64,
+    pub with_title: i64,
+    pub with_description: i64,
+    pub with_og: i64,
+    pub with_snippet: i64,
+    pub errors: i64,
+    pub lang_counts: Vec<(String, i64)>,
+    pub source_counts: Vec<(String, i64)>,
 }
 
 #[derive(Debug)]
