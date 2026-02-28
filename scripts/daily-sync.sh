@@ -9,7 +9,7 @@ REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 
 # Logging function
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
 }
 
 # Check for lock file
@@ -37,7 +37,7 @@ if [ "${DETAILED_MODE:-false}" = "true" ]; then
     DETAILED_FLAG="--detailed"
     log "Using detailed mode"
 fi
-./target/release/domain-indexer daily --download ${DETAILED_FLAG} --index "${INDEX_PATH:-./data/index}" 2>&1 | tee -a "$LOG_FILE"
+./target/release/domain-indexer daily --download ${DETAILED_FLAG} --index "${INDEX_PATH:-./data/index}" >> "$LOG_FILE" 2>&1
 
 # Note: API auto-reloads via Tantivy's file watcher (no restart needed)
 
