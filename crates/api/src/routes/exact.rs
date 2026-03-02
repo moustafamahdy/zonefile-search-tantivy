@@ -50,6 +50,18 @@ pub struct DomainResult {
     pub phone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seo_rank: Option<String>,
+
+    // Page metadata fields (omitted from JSON when None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub og_image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 // Bulk exact lookup types
@@ -254,6 +266,12 @@ pub fn extract_domain_result(
     let phone = extract_optional(schema.phone);
     let seo_rank = extract_optional(schema.seo_rank);
 
+    let page_title = extract_optional(schema.page_title);
+    let meta_description = extract_optional(schema.meta_description);
+    let og_image = extract_optional(schema.og_image);
+    let snippet = extract_optional(schema.snippet);
+    let language = extract_optional(schema.language);
+
     DomainResult {
         domain,
         label,
@@ -268,5 +286,10 @@ pub fn extract_domain_result(
         email,
         phone,
         seo_rank,
+        page_title,
+        meta_description,
+        og_image,
+        snippet,
+        language,
     }
 }

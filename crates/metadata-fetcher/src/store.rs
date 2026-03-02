@@ -4,6 +4,54 @@ use std::path::Path;
 use tokio_rusqlite::Connection;
 use tracing::info;
 
+/// Lightweight row for importing page metadata into Tantivy.
+/// Only the fields we actually store in the index.
+#[derive(Debug, Clone)]
+pub struct PageMetaRow {
+    pub page_title: Option<String>,
+    pub meta_description: Option<String>,
+    pub og_image: Option<String>,
+    pub snippet: Option<String>,
+    pub language: Option<String>,
+}
+
+/// Load all domains with page metadata from SQLite (sync, for importer).
+/// Returns (domain, PageMetaRow) pairs where page_title IS NOT NULL.
+pub fn load_domains_with_page_metadata(
+    db_path: &Path,
+) -> std::result::Result<Vec<(String, PageMetaRow)>, rusqlite::Error> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.execute_batch("PRAGMA cache_size = -65536;")?;
+
+    let mut stmt = conn.prepare(
+        "SELECT domain, page_title, meta_description, og_image, snippet, language
+         FROM page_metadata
+         WHERE page_title IS NOT NULL",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PageMetaRow {
+                page_title: row.get(1)?,
+                meta_description: row.get(2)?,
+                og_image: row.get(3)?,
+                snippet: row.get(4)?,
+                language: row.get(5)?,
+            },
+        ))
+    })?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 #[derive(Clone)]
 pub struct MetadataStore {
     conn: Connection,

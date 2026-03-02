@@ -1,118 +1,129 @@
 use crate::config::FetcherConfig;
 use crate::error::Result;
 use crate::progress::CrawlProgress;
-use crate::store::MetadataStore;
+use crate::store::{load_domains_with_page_metadata, PageMetaRow};
 use domain_core::{register_ngram_tokenizer, DomainSchema};
+use std::collections::HashMap;
 use std::path::Path;
-use tantivy::schema::Value;
+use tantivy::collector::TopDocs;
+use tantivy::query::TermQuery;
+use tantivy::schema::IndexRecordOption;
 use tantivy::{Index, TantivyDocument, Term};
 use tracing::{info, warn};
 
-/// Import metadata results from SQLite back into the Tantivy index.
+/// Import page metadata from SQLite into the Tantivy index.
 ///
-/// Adds new metadata fields (page_count, last_updated, cms, site_category, has_sitemap)
-/// using a delete+re-add strategy per document.
-///
-/// NOTE: Requires DomainSchema to include the new fields first.
+/// Strategy: iterate over SQLite rows that have page_title (the smaller set, ~494K),
+/// look each up in Tantivy, delete the old doc and re-add with page metadata fields.
 pub async fn import_metadata(
     index_path: &Path,
     config: &FetcherConfig,
-    _store: &MetadataStore,
 ) -> Result<()> {
-    info!(index = ?index_path, "Importing metadata into Tantivy index");
+    info!(index = ?index_path, db = ?config.db_path, "Importing page metadata into Tantivy index");
 
+    // 1. Open Tantivy index
     let index = Index::open_in_dir(index_path)?;
     register_ngram_tokenizer(&index);
 
     let schema = index.schema();
-    let schema_helper = DomainSchema::from_existing(&schema);
+    let ds = DomainSchema::from_existing(&schema);
 
-    // Look up new metadata fields
-    let page_count_field = schema.get_field("page_count").ok();
-    let _last_updated_field = schema.get_field("last_updated").ok();
-    let _cms_field = schema.get_field("cms").ok();
-    let _site_category_field = schema.get_field("site_category").ok();
-    let _has_sitemap_field = schema.get_field("has_sitemap").ok();
-
-    if page_count_field.is_none() {
-        warn!("New metadata fields not found in schema. Update DomainSchema::new() and rebuild the index first.");
+    // Verify page metadata fields exist in schema
+    if ds.page_title.is_none() {
+        warn!("page_title field not found in index schema. The index needs to be rebuilt with the new schema first.");
+        warn!("Run a full re-index to add the new fields, then retry import.");
         return Ok(());
     }
 
-    let reader = index.reader()?;
-    let searcher = reader.searcher();
-    let total = searcher.num_docs();
-    let progress = CrawlProgress::new(total);
+    let page_title_field = ds.page_title.unwrap();
+    let meta_desc_field = ds.meta_description.unwrap();
+    let og_image_field = ds.og_image.unwrap();
+    let snippet_field = ds.snippet.unwrap();
+    let language_field = ds.language.unwrap();
 
+    // 2. Load all domains with page metadata from SQLite
+    info!("Loading domains with page metadata from SQLite...");
+    let metadata_rows = load_domains_with_page_metadata(&config.db_path)?;
+
+    let total = metadata_rows.len();
+    info!(total, "Domains with page metadata loaded");
+
+    if total == 0 {
+        info!("No page metadata to import");
+        return Ok(());
+    }
+
+    // Build a HashMap for fast lookup
+    let metadata_map: HashMap<String, PageMetaRow> = metadata_rows.into_iter().collect();
+
+    // 3. Set up Tantivy writer
     let heap_size = 500 * 1024 * 1024; // 500MB
     let mut writer = index.writer::<TantivyDocument>(heap_size)?;
+    let reader = index.reader()?;
+    let searcher = reader.searcher();
 
-    let mut imported: u64 = 0;
-    let mut committed: u64 = 0;
+    let progress = CrawlProgress::new(total as u64);
+    let mut enriched: u64 = 0;
+    let mut not_found: u64 = 0;
+    let commit_interval = config.import_commit_interval as u64;
 
-    // Process per-segment to bound memory
-    for segment_reader in searcher.segment_readers() {
-        let store_reader = segment_reader.get_store_reader(50)?;
+    // 4. Process domains in order: look up each in Tantivy, enrich, re-add
+    let domains: Vec<String> = metadata_map.keys().cloned().collect();
 
-        // Collect domain names for this segment in chunks and batch-query SQLite
-        let num_docs = segment_reader.num_docs();
-        let chunk_size: u32 = 50_000;
-        let mut doc_offset: u32 = 0;
+    for domain in &domains {
+        let meta = &metadata_map[domain];
 
-        while doc_offset < num_docs {
-            let end = (doc_offset + chunk_size).min(num_docs);
+        // Look up domain in Tantivy
+        let term = Term::from_field_text(ds.domain_exact, domain);
+        let query = TermQuery::new(term.clone(), IndexRecordOption::Basic);
 
-            // Collect domains in this chunk
-            let mut chunk_domains: Vec<(u32, String)> = Vec::new();
-            for doc_id in doc_offset..end {
-                if segment_reader.is_deleted(doc_id) {
-                    continue;
-                }
-                if let Ok(doc) = store_reader.get::<TantivyDocument>(doc_id) {
-                    if let Some(domain) = doc
-                        .get_first(schema_helper.domain_exact)
-                        .and_then(|v| v.as_str())
-                    {
-                        chunk_domains.push((doc_id, domain.to_string()));
-                    }
-                }
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
+
+        if let Some((_score, doc_address)) = top_docs.first() {
+            let doc: TantivyDocument = searcher.doc(*doc_address)?;
+
+            // Delete old document
+            writer.delete_term(term);
+
+            // Clone and add page metadata fields
+            let mut new_doc = doc;
+
+            if let Some(ref title) = meta.page_title {
+                new_doc.add_text(page_title_field, title);
+            }
+            if let Some(ref desc) = meta.meta_description {
+                new_doc.add_text(meta_desc_field, desc);
+            }
+            if let Some(ref img) = meta.og_image {
+                new_doc.add_text(og_image_field, img);
+            }
+            if let Some(ref snip) = meta.snippet {
+                new_doc.add_text(snippet_field, snip);
+            }
+            if let Some(ref lang) = meta.language {
+                new_doc.add_text(language_field, lang);
             }
 
-            // Batch-query SQLite for this chunk's domains
-            // (MetadataStore would need a batch lookup method for production use)
-            // For now, process individually since SQLite is fast enough with WAL mode
-            for (doc_id, domain) in &chunk_domains {
-                if let Ok(doc) = store_reader.get::<TantivyDocument>(*doc_id) {
-                    let term = Term::from_field_text(schema_helper.domain_exact, domain);
-                    writer.delete_term(term);
+            writer.add_document(new_doc)?;
+            enriched += 1;
+        } else {
+            not_found += 1;
+        }
 
-                    let new_doc = doc.clone();
+        if (enriched + not_found) % 10_000 == 0 {
+            progress.inc(10_000);
+        }
 
-                    // The actual metadata lookup and field addition would go here
-                    // once the store has a batch lookup method and the schema has the new fields
-
-                    writer.add_document(new_doc)?;
-                    imported += 1;
-
-                    if imported - committed >= config.import_commit_interval as u64 {
-                        info!(imported, "Committing batch...");
-                        writer.commit()?;
-                        committed = imported;
-                    }
-
-                    if imported % 1_000_000 == 0 {
-                        progress.inc(1_000_000);
-                    }
-                }
-            }
-
-            doc_offset = end;
+        if enriched > 0 && enriched % commit_interval == 0 {
+            info!(enriched, not_found, "Committing batch...");
+            writer.commit()?;
         }
     }
 
+    // Final commit
     writer.commit()?;
     progress.finish();
 
-    info!(imported, "Import complete");
+    info!(enriched, not_found, total, "Page metadata import complete");
     Ok(())
 }

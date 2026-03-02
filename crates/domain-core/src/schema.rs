@@ -29,6 +29,13 @@ pub struct DomainSchema {
     pub email: Option<Field>,
     pub phone: Option<Field>,
     pub seo_rank: Option<Field>,
+
+    // Page metadata fields (may not be present in older indexes)
+    pub page_title: Option<Field>,
+    pub meta_description: Option<Field>,
+    pub og_image: Option<Field>,
+    pub snippet: Option<Field>,
+    pub language: Option<Field>,
 }
 
 impl DomainSchema {
@@ -96,6 +103,14 @@ impl DomainSchema {
         let phone = schema_builder.add_text_field("phone", STORED);
         let seo_rank = schema_builder.add_text_field("seo_rank", STORED);
 
+        // Page metadata fields - stored only (display)
+        let page_title = schema_builder.add_text_field("page_title", STORED);
+        let meta_description = schema_builder.add_text_field("meta_description", STORED);
+        let og_image = schema_builder.add_text_field("og_image", STORED);
+        let snippet = schema_builder.add_text_field("snippet", STORED);
+        // language is filterable (STRING for exact match)
+        let language = schema_builder.add_text_field("language", STRING | STORED);
+
         let schema = schema_builder.build();
 
         Self {
@@ -114,6 +129,11 @@ impl DomainSchema {
             email: Some(email),
             phone: Some(phone),
             seo_rank: Some(seo_rank),
+            page_title: Some(page_title),
+            meta_description: Some(meta_description),
+            og_image: Some(og_image),
+            snippet: Some(snippet),
+            language: Some(language),
         }
     }
 
@@ -138,6 +158,11 @@ impl DomainSchema {
             email: schema.get_field("email").ok(),
             phone: schema.get_field("phone").ok(),
             seo_rank: schema.get_field("seo_rank").ok(),
+            page_title: schema.get_field("page_title").ok(),
+            meta_description: schema.get_field("meta_description").ok(),
+            og_image: schema.get_field("og_image").ok(),
+            snippet: schema.get_field("snippet").ok(),
+            language: schema.get_field("language").ok(),
         }
     }
 

@@ -204,8 +204,7 @@ async fn main() -> Result<()> {
             if let Some(idx) = index {
                 config.index_path = idx;
             }
-            let store = MetadataStore::open(&config.db_path).await?;
-            importer::import_metadata(&config.index_path, &config, &store).await?;
+            importer::import_metadata(&config.index_path, &config).await?;
         }
 
         Commands::FetchPages {
