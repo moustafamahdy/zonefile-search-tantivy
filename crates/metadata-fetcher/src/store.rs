@@ -415,13 +415,39 @@ impl MetadataStore {
     }
 
     /// Export domains that failed during page crawl (for CC enrichment).
-    /// Returns domains where error IS NOT NULL AND page_title IS NULL.
-    pub async fn export_failed_domains(&self) -> Result<Vec<String>> {
+    ///
+    /// `http_only`: if true, only return domains that got an HTTP response (status > 0)
+    ///              but still have no page_title. These are higher-value targets.
+    ///              if false, return ALL failed domains (including connection failures).
+    pub async fn export_failed_domains(&self, http_only: bool) -> Result<Vec<String>> {
+        let domains = self
+            .conn
+            .call(move |conn| {
+                let sql = if http_only {
+                    "SELECT domain FROM page_metadata WHERE http_status > 0 AND page_title IS NULL AND error IS NOT NULL"
+                } else {
+                    "SELECT domain FROM page_metadata WHERE error IS NOT NULL AND page_title IS NULL"
+                };
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                let mut result = Vec::new();
+                for row in rows {
+                    result.push(row?);
+                }
+                Ok(result)
+            })
+            .await?;
+        Ok(domains)
+    }
+
+    /// Export domains that returned HTTP 403 (blocked by server).
+    /// Best candidates for Scrapling stealth fetcher.
+    pub async fn export_blocked_domains(&self) -> Result<Vec<String>> {
         let domains = self
             .conn
             .call(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT domain FROM page_metadata WHERE error IS NOT NULL AND page_title IS NULL",
+                    "SELECT domain FROM page_metadata WHERE http_status = 403 AND page_title IS NULL",
                 )?;
                 let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
                 let mut result = Vec::new();

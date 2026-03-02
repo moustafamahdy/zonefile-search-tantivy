@@ -44,6 +44,9 @@ pub struct FetcherConfig {
 
     /// Concurrent WAT S3 fetch requests
     pub cc_wat_concurrency: usize,
+
+    /// Only enrich domains that got an HTTP response (not connection failures)
+    pub cc_http_only: bool,
 }
 
 impl FetcherConfig {
@@ -116,6 +119,11 @@ impl FetcherConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100),
+
+            cc_http_only: std::env::var("CC_HTTP_ONLY")
+                .ok()
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true),
         })
     }
 }

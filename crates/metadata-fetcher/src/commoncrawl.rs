@@ -161,8 +161,8 @@ pub async fn run_commoncrawl_enrichment(
         "Starting Common Crawl enrichment"
     );
 
-    // 1. Export failed domains
-    let failed_domains = store.export_failed_domains().await?;
+    // 1. Export failed domains (http_only = true to focus on domains that responded)
+    let failed_domains = store.export_failed_domains(config.cc_http_only).await?;
     let total = failed_domains.len();
     info!(total, "Failed domains exported for CC enrichment");
 

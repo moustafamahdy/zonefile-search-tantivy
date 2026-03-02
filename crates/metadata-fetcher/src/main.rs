@@ -129,6 +129,25 @@ enum Commands {
         /// Delay between CDX API requests in milliseconds
         #[arg(long)]
         cdx_delay_ms: Option<u64>,
+
+        /// Only process domains that got an HTTP response (skip connection failures)
+        #[arg(long, default_value = "true")]
+        http_only: bool,
+
+        /// Also include all connection-failed domains (overrides --http-only)
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Export domains that returned HTTP 403 (for Scrapling)
+    ExportBlocked {
+        /// Path to SQLite results database
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Output file path (one domain per line)
+        #[arg(short, long)]
+        output: PathBuf,
     },
 
     /// Import metadata from a JSONL file into the SQLite database
@@ -276,6 +295,8 @@ async fn main() -> Result<()> {
             index,
             concurrency,
             cdx_delay_ms,
+            http_only,
+            all,
         } => {
             if let Some(db) = db {
                 config.db_path = db;
@@ -289,9 +310,26 @@ async fn main() -> Result<()> {
             if let Some(d) = cdx_delay_ms {
                 config.cc_cdx_delay_ms = d;
             }
+            if all {
+                config.cc_http_only = false;
+            } else {
+                config.cc_http_only = http_only;
+            }
 
             let store = MetadataStore::open(&config.db_path).await?;
             commoncrawl::run_commoncrawl_enrichment(&config, store).await?;
+        }
+
+        Commands::ExportBlocked { db, output } => {
+            if let Some(db) = db {
+                config.db_path = db;
+            }
+            let store = MetadataStore::open(&config.db_path).await?;
+            let domains = store.export_blocked_domains().await?;
+            info!(count = domains.len(), "Exporting blocked domains");
+            let content = domains.join("\n");
+            tokio::fs::write(&output, content).await?;
+            info!(path = ?output, count = domains.len(), "Blocked domains exported");
         }
 
         Commands::ImportJsonl { input, db, source } => {
