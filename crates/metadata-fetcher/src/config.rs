@@ -35,6 +35,15 @@ pub struct FetcherConfig {
 
     /// Per-request timeout for page fetch in seconds
     pub page_request_timeout_secs: u64,
+
+    /// Common Crawl index name (e.g., CC-MAIN-2025-08)
+    pub cc_index: String,
+
+    /// Delay between CDX API requests in milliseconds
+    pub cc_cdx_delay_ms: u64,
+
+    /// Concurrent WAT S3 fetch requests
+    pub cc_wat_concurrency: usize,
 }
 
 impl FetcherConfig {
@@ -94,6 +103,19 @@ impl FetcherConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(15),
+
+            cc_index: std::env::var("CC_INDEX")
+                .unwrap_or_else(|_| "CC-MAIN-2025-08".to_string()),
+
+            cc_cdx_delay_ms: std::env::var("CC_CDX_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+
+            cc_wat_concurrency: std::env::var("CC_WAT_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
         })
     }
 }

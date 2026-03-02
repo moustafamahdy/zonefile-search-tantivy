@@ -1613,6 +1613,7 @@ dependencies = [
  "clap",
  "domain-core",
  "dotenvy",
+ "flate2",
  "futures",
  "hickory-resolver",
  "indicatif",

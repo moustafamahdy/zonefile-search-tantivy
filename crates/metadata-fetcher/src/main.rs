@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod commoncrawl;
 mod config;
 mod crawler;
 mod error;
@@ -18,6 +19,7 @@ mod progress;
 mod robots;
 mod sitemap;
 mod store;
+mod wat_parser;
 
 use config::FetcherConfig;
 use store::MetadataStore;
@@ -108,6 +110,40 @@ enum Commands {
         /// Path to SQLite results database
         #[arg(long)]
         db: Option<PathBuf>,
+    },
+
+    /// Enrich failed domains with metadata from Common Crawl WAT files
+    EnrichCc {
+        /// Path to SQLite results database
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Common Crawl index to query (e.g., CC-MAIN-2025-08)
+        #[arg(long, alias = "cc-index")]
+        index: Option<String>,
+
+        /// Concurrent WAT S3 fetch requests
+        #[arg(long)]
+        concurrency: Option<usize>,
+
+        /// Delay between CDX API requests in milliseconds
+        #[arg(long)]
+        cdx_delay_ms: Option<u64>,
+    },
+
+    /// Import metadata from a JSONL file into the SQLite database
+    ImportJsonl {
+        /// Path to the JSONL input file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Path to SQLite results database
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Source label for imported records (e.g., "scrapling")
+        #[arg(long, default_value = "jsonl")]
+        source: String,
     },
 }
 
@@ -233,6 +269,38 @@ async fn main() -> Result<()> {
 
             info!(path = ?file_path, "Streaming domains from file");
             page_crawler::run_page_crawl(&file_path, &config, store, resume).await?;
+        }
+
+        Commands::EnrichCc {
+            db,
+            index,
+            concurrency,
+            cdx_delay_ms,
+        } => {
+            if let Some(db) = db {
+                config.db_path = db;
+            }
+            if let Some(idx) = index {
+                config.cc_index = idx;
+            }
+            if let Some(c) = concurrency {
+                config.cc_wat_concurrency = c;
+            }
+            if let Some(d) = cdx_delay_ms {
+                config.cc_cdx_delay_ms = d;
+            }
+
+            let store = MetadataStore::open(&config.db_path).await?;
+            commoncrawl::run_commoncrawl_enrichment(&config, store).await?;
+        }
+
+        Commands::ImportJsonl { input, db, source } => {
+            if let Some(db) = db {
+                config.db_path = db;
+            }
+
+            let store = MetadataStore::open(&config.db_path).await?;
+            commoncrawl::import_jsonl(&input, &store, Some(&source)).await?;
         }
 
         Commands::PageStats { db } => {

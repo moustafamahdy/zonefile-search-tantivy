@@ -58,3 +58,6 @@ rand = { workspace = true }
 
 # HTML parsing
 scraper = { workspace = true }
+
+# Compression (WAT gzip decompression)
+flate2 = { workspace = true }

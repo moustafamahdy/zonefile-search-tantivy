@@ -85,6 +85,9 @@ rand = "0.8"
 # HTML parsing
 scraper = "0.22"
 
+# Compression
+flate2 = "1.0"
+
 # Testing
 wiremock = "0.6"
 

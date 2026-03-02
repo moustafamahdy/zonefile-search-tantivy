@@ -414,6 +414,26 @@ impl MetadataStore {
         Ok(stats)
     }
 
+    /// Export domains that failed during page crawl (for CC enrichment).
+    /// Returns domains where error IS NOT NULL AND page_title IS NULL.
+    pub async fn export_failed_domains(&self) -> Result<Vec<String>> {
+        let domains = self
+            .conn
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT domain FROM page_metadata WHERE error IS NOT NULL AND page_title IS NULL",
+                )?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                let mut result = Vec::new();
+                for row in rows {
+                    result.push(row?);
+                }
+                Ok(result)
+            })
+            .await?;
+        Ok(domains)
+    }
+
     pub async fn count_pages_done(&self) -> Result<u64> {
         let count: i64 = self
             .conn
