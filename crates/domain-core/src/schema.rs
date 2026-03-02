@@ -108,8 +108,16 @@ impl DomainSchema {
         let meta_description = schema_builder.add_text_field("meta_description", STORED);
         let og_image = schema_builder.add_text_field("og_image", STORED);
         let snippet = schema_builder.add_text_field("snippet", STORED);
-        // language is filterable (STRING for exact match)
-        let language = schema_builder.add_text_field("language", STRING | STORED);
+        // language is filterable (STRING for exact match, no fieldnorms)
+        let language_options = TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("raw")
+                    .set_index_option(IndexRecordOption::Basic)
+                    .set_fieldnorms(false),
+            )
+            .set_stored();
+        let language = schema_builder.add_text_field("language", language_options);
 
         let schema = schema_builder.build();
 
