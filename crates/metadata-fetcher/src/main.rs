@@ -19,7 +19,7 @@ mod progress;
 mod robots;
 mod sitemap;
 mod store;
-mod wat_parser;
+// mod wat_parser; // Available for WAT-based enrichment if needed
 
 use config::FetcherConfig;
 use store::MetadataStore;

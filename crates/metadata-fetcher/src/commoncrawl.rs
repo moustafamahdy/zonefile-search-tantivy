@@ -3,12 +3,10 @@ use crate::error::Result;
 use crate::model::PageMetadataResult;
 use crate::progress::CrawlProgress;
 use crate::store::MetadataStore;
-use crate::wat_parser::parse_wat_metadata;
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 use std::io::Read;
 use std::time::Duration;
-use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 const CDX_BASE_URL: &str = "https://index.commoncrawl.org";
@@ -27,14 +25,13 @@ struct CdxRecord {
 }
 
 /// Query CDX API for a single domain's best capture.
-/// Returns the WARC filename + byte range if found.
 async fn lookup_cdx(
     client: &reqwest::Client,
     domain: &str,
     cc_index: &str,
 ) -> Option<CdxRecord> {
     let url = format!(
-        "{}/{}-index?url={}&output=json&filter=statuscode:200&limit=1",
+        "{}/{}-index?url=https://{}/*&output=json&filter=statuscode:200&limit=1",
         CDX_BASE_URL, cc_index, domain
     );
 
@@ -47,7 +44,6 @@ async fn lookup_cdx(
     };
 
     if !resp.status().is_success() {
-        debug!(domain, status = %resp.status(), "CDX non-200 response");
         return None;
     }
 
@@ -62,34 +58,18 @@ async fn lookup_cdx(
         return None;
     }
 
-    match serde_json::from_str::<CdxRecord>(first_line) {
-        Ok(record) => Some(record),
-        Err(e) => {
-            debug!(domain, error = %e, "CDX JSON parse failed");
-            None
-        }
-    }
+    serde_json::from_str::<CdxRecord>(first_line).ok()
 }
 
-/// Convert a WARC filename to its corresponding WAT filename.
-/// e.g., crawl-data/CC-MAIN-.../warc/CC-MAIN-...-00000.warc.gz
-///    -> crawl-data/CC-MAIN-.../wat/CC-MAIN-...-00000.warc.wat.gz
-fn warc_to_wat_path(warc_filename: &str) -> String {
-    warc_filename
-        .replace("/warc/", "/wat/")
-        .replace(".warc.gz", ".warc.wat.gz")
-}
-
-/// Fetch a WAT record from S3 using HTTP Range request, decompress gzip.
-async fn fetch_wat_record(
+/// Fetch a WARC record from S3 using HTTP Range request, decompress gzip,
+/// and extract the HTTP response body (HTML).
+async fn fetch_warc_html(
     client: &reqwest::Client,
     warc_filename: &str,
     offset: u64,
     length: u64,
-) -> Option<Vec<u8>> {
-    let wat_path = warc_to_wat_path(warc_filename);
-    let url = format!("{}/{}", S3_BASE_URL, wat_path);
-
+) -> Option<String> {
+    let url = format!("{}/{}", S3_BASE_URL, warc_filename);
     let end = offset + length - 1;
     let range = format!("bytes={}-{}", offset, end);
 
@@ -101,13 +81,12 @@ async fn fetch_wat_record(
     {
         Ok(r) => r,
         Err(e) => {
-            debug!(error = %e, "WAT S3 fetch failed");
+            debug!(error = %e, "WARC S3 fetch failed");
             return None;
         }
     };
 
     if !resp.status().is_success() && resp.status().as_u16() != 206 {
-        debug!(status = %resp.status(), "WAT S3 non-206 response");
         return None;
     }
 
@@ -119,37 +98,186 @@ async fn fetch_wat_record(
     // Decompress gzip
     let mut decoder = GzDecoder::new(&compressed[..]);
     let mut decompressed = Vec::new();
-    match decoder.read_to_end(&mut decompressed) {
-        Ok(_) => Some(decompressed),
-        Err(e) => {
-            debug!(error = %e, "WAT gzip decompress failed");
-            None
-        }
+    if decoder.read_to_end(&mut decompressed).is_err() {
+        return None;
     }
+
+    let raw = String::from_utf8_lossy(&decompressed);
+
+    // WARC record structure:
+    // WARC/1.0 headers\r\n\r\n
+    // HTTP/1.1 200 OK\r\nheaders\r\n\r\n
+    // <html>...</html>
+    //
+    // Find the HTTP response body by looking for double CRLF after HTTP headers
+    let warc_str = raw.as_ref();
+
+    // Skip WARC header block (first \r\n\r\n)
+    let after_warc = warc_str.find("\r\n\r\n").map(|i| &warc_str[i + 4..])?;
+
+    // Skip HTTP header block (second \r\n\r\n)
+    let html_start = after_warc.find("\r\n\r\n").map(|i| &after_warc[i + 4..])?;
+
+    // Limit to ~200KB to avoid huge pages
+    let html = if html_start.len() > 200_000 {
+        &html_start[..200_000]
+    } else {
+        html_start
+    };
+
+    Some(html.to_string())
 }
 
-/// Extract the JSON payload from a raw WAT record.
-/// WAT records have WARC headers followed by a blank line, then the JSON.
-fn extract_json_from_wat(raw: &[u8]) -> Option<&[u8]> {
-    // Find the first occurrence of "\r\n\r\n" or "\n\n" which separates headers from body
-    // WAT records can have multiple WARC headers blocks; we need the JSON after the last one
-    let raw_str = std::str::from_utf8(raw).ok()?;
+/// Parse HTML to extract page metadata using the scraper crate.
+fn parse_html_metadata(domain: &str, html: &str) -> PageMetadataResult {
+    use scraper::{Html, Selector};
 
-    // WAT records typically have:
-    // 1. WARC/1.0 header block (warc-type: metadata)
-    // 2. blank line
-    // 3. JSON payload
-    // But some have nested WARC headers. Look for the JSON start.
-    let json_start = raw_str.find('{')?;
-    Some(raw[json_start..].as_ref())
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let mut result = PageMetadataResult {
+        domain: domain.to_string(),
+        http_status: 200,
+        page_title: None,
+        meta_description: None,
+        og_title: None,
+        og_description: None,
+        og_image: None,
+        canonical_url: None,
+        language: None,
+        generator: None,
+        snippet: None,
+        content_type: None,
+        fetched_at: now,
+        source: "commoncrawl".to_string(),
+        error: None,
+    };
+
+    let document = Html::parse_document(html);
+
+    // Title
+    if let Ok(sel) = Selector::parse("title") {
+        if let Some(el) = document.select(&sel).next() {
+            let title = el.text().collect::<String>();
+            let title = title.trim();
+            if !title.is_empty() {
+                result.page_title = Some(title[..title.len().min(500)].to_string());
+            }
+        }
+    }
+
+    // Meta description
+    if let Ok(sel) = Selector::parse(r#"meta[name="description"]"#) {
+        if let Some(el) = document.select(&sel).next() {
+            if let Some(content) = el.value().attr("content") {
+                let content = content.trim();
+                if !content.is_empty() {
+                    result.meta_description = Some(content[..content.len().min(1000)].to_string());
+                }
+            }
+        }
+    }
+
+    // OG title
+    if let Ok(sel) = Selector::parse(r#"meta[property="og:title"]"#) {
+        if let Some(el) = document.select(&sel).next() {
+            if let Some(content) = el.value().attr("content") {
+                let content = content.trim();
+                if !content.is_empty() {
+                    result.og_title = Some(content[..content.len().min(500)].to_string());
+                }
+            }
+        }
+    }
+
+    // OG description
+    if let Ok(sel) = Selector::parse(r#"meta[property="og:description"]"#) {
+        if let Some(el) = document.select(&sel).next() {
+            if let Some(content) = el.value().attr("content") {
+                let content = content.trim();
+                if !content.is_empty() {
+                    result.og_description = Some(content[..content.len().min(1000)].to_string());
+                }
+            }
+        }
+    }
+
+    // OG image
+    if let Ok(sel) = Selector::parse(r#"meta[property="og:image"]"#) {
+        if let Some(el) = document.select(&sel).next() {
+            if let Some(content) = el.value().attr("content") {
+                let content = content.trim();
+                if !content.is_empty() {
+                    result.og_image = Some(content[..content.len().min(2000)].to_string());
+                }
+            }
+        }
+    }
+
+    // Canonical URL
+    if let Ok(sel) = Selector::parse(r#"link[rel="canonical"]"#) {
+        if let Some(el) = document.select(&sel).next() {
+            if let Some(href) = el.value().attr("href") {
+                let href = href.trim();
+                if !href.is_empty() {
+                    result.canonical_url = Some(href[..href.len().min(2000)].to_string());
+                }
+            }
+        }
+    }
+
+    // Language from html tag
+    if let Ok(sel) = Selector::parse("html") {
+        if let Some(el) = document.select(&sel).next() {
+            if let Some(lang) = el.value().attr("lang") {
+                let lang = lang.split(['-', '_']).next().unwrap_or(lang).trim();
+                if !lang.is_empty() {
+                    result.language = Some(lang.to_lowercase());
+                }
+            }
+        }
+    }
+
+    // Language from meta tag (fallback)
+    if result.language.is_none() {
+        if let Ok(sel) = Selector::parse(r#"meta[http-equiv="content-language"]"#) {
+            if let Some(el) = document.select(&sel).next() {
+                if let Some(content) = el.value().attr("content") {
+                    let lang = content.split(['-', '_']).next().unwrap_or(content).trim();
+                    if !lang.is_empty() {
+                        result.language = Some(lang.to_lowercase());
+                    }
+                }
+            }
+        }
+    }
+
+    // Generator
+    if let Ok(sel) = Selector::parse(r#"meta[name="generator"]"#) {
+        if let Some(el) = document.select(&sel).next() {
+            if let Some(content) = el.value().attr("content") {
+                let content = content.trim();
+                if !content.is_empty() {
+                    result.generator = Some(content[..content.len().min(200)].to_string());
+                }
+            }
+        }
+    }
+
+    // Snippet (prefer description, fallback to og:description)
+    result.snippet = result.meta_description.clone().or_else(|| result.og_description.clone());
+
+    result
 }
 
 /// Run the Common Crawl enrichment pipeline.
 ///
 /// 1. Export failed domains from SQLite
-/// 2. For each, query CDX API
-/// 3. Fetch WAT records in parallel
-/// 4. Parse metadata and upsert into SQLite
+/// 2. For each, query CDX API for a cached copy
+/// 3. Fetch WARC record from S3, decompress, parse HTML
+/// 4. Upsert metadata into SQLite
 pub async fn run_commoncrawl_enrichment(
     config: &FetcherConfig,
     store: MetadataStore,
@@ -158,10 +286,11 @@ pub async fn run_commoncrawl_enrichment(
         cc_index = %config.cc_index,
         concurrency = config.cc_wat_concurrency,
         cdx_delay_ms = config.cc_cdx_delay_ms,
+        http_only = config.cc_http_only,
         "Starting Common Crawl enrichment"
     );
 
-    // 1. Export failed domains (http_only = true to focus on domains that responded)
+    // 1. Export failed domains
     let failed_domains = store.export_failed_domains(config.cc_http_only).await?;
     let total = failed_domains.len();
     info!(total, "Failed domains exported for CC enrichment");
@@ -186,13 +315,12 @@ pub async fn run_commoncrawl_enrichment(
         .map_err(|e| crate::error::Error::Config(format!("Failed to build S3 client: {}", e)))?;
 
     let progress = CrawlProgress::new(total as u64);
-    let sem = std::sync::Arc::new(Semaphore::new(config.cc_wat_concurrency));
     let cdx_delay = Duration::from_millis(config.cc_cdx_delay_ms);
 
     let mut found: u64 = 0;
     let mut enriched: u64 = 0;
     let mut no_cdx: u64 = 0;
-    let mut wat_failed: u64 = 0;
+    let mut fetch_failed: u64 = 0;
     let mut batch: Vec<PageMetadataResult> = Vec::new();
     let batch_size = 500;
 
@@ -221,7 +349,7 @@ pub async fn run_commoncrawl_enrichment(
         let offset: u64 = match cdx.offset.parse() {
             Ok(v) => v,
             Err(_) => {
-                no_cdx += 1;
+                fetch_failed += 1;
                 progress.inc(1);
                 continue;
             }
@@ -229,32 +357,23 @@ pub async fn run_commoncrawl_enrichment(
         let length: u64 = match cdx.length.parse() {
             Ok(v) => v,
             Err(_) => {
-                no_cdx += 1;
+                fetch_failed += 1;
                 progress.inc(1);
                 continue;
             }
         };
 
-        // WAT fetch (concurrent via semaphore)
-        let _permit = sem.acquire().await.unwrap();
-        let raw_wat = fetch_wat_record(&s3_client, &cdx.filename, offset, length).await;
-
-        match raw_wat {
-            Some(raw) => {
-                // Extract JSON from WAT record
-                if let Some(json_bytes) = extract_json_from_wat(&raw) {
-                    let meta = parse_wat_metadata(domain, json_bytes);
-                    if meta.page_title.is_some() {
-                        enriched += 1;
-                    }
-                    batch.push(meta);
-                } else {
-                    wat_failed += 1;
-                    debug!(domain, "No JSON found in WAT record");
+        // Fetch WARC record and extract HTML
+        match fetch_warc_html(&s3_client, &cdx.filename, offset, length).await {
+            Some(html) => {
+                let meta = parse_html_metadata(domain, &html);
+                if meta.page_title.is_some() {
+                    enriched += 1;
                 }
+                batch.push(meta);
             }
             None => {
-                wat_failed += 1;
+                fetch_failed += 1;
             }
         }
 
@@ -267,14 +386,14 @@ pub async fn run_commoncrawl_enrichment(
         }
 
         // Log progress periodically
-        if (i + 1) % 10_000 == 0 {
+        if (i + 1) % 1_000 == 0 {
             info!(
                 processed = i + 1,
                 total,
                 found,
                 enriched,
                 no_cdx,
-                wat_failed,
+                fetch_failed,
                 "CC enrichment progress"
             );
         }
@@ -291,7 +410,7 @@ pub async fn run_commoncrawl_enrichment(
         found,
         enriched,
         no_cdx,
-        wat_failed,
+        fetch_failed,
         "Common Crawl enrichment complete"
     );
 
