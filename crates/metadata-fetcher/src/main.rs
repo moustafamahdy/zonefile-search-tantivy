@@ -15,6 +15,7 @@ mod importer;
 mod model;
 mod page_crawler;
 mod page_fetcher;
+mod precheck;
 mod progress;
 mod robots;
 mod sitemap;
@@ -152,6 +153,29 @@ enum Commands {
         /// Output file path (one domain per line)
         #[arg(short, long)]
         output: PathBuf,
+    },
+
+    /// HEAD pre-check domains to filter out dead/parking before re-fetching
+    Precheck {
+        /// Input file: one domain per line
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output file: reachable domains (one per line)
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Optional file for filtered-out domains (with reason)
+        #[arg(long)]
+        filtered: Option<PathBuf>,
+
+        /// Maximum concurrent HEAD requests
+        #[arg(long, default_value = "2000")]
+        concurrency: usize,
+
+        /// Per-request timeout in seconds
+        #[arg(long, default_value = "5")]
+        timeout: u64,
     },
 
     /// Import metadata from a JSONL file into the SQLite database
@@ -339,6 +363,37 @@ async fn main() -> Result<()> {
             let content = domains.join("\n");
             tokio::fs::write(&output, content).await?;
             info!(path = ?output, count = domains.len(), "Blocked domains exported");
+        }
+
+        Commands::Precheck {
+            input,
+            output,
+            filtered,
+            concurrency,
+            timeout,
+        } => {
+            let summary = precheck::run_precheck(
+                &input,
+                &output,
+                filtered.as_deref(),
+                concurrency,
+                timeout,
+            )
+            .await?;
+
+            println!("=== Pre-Check Summary ===");
+            println!("Total checked:       {}", summary.total);
+            println!("Reachable:           {} ({:.1}%)", summary.reachable, pct(summary.reachable as i64, summary.total as i64));
+            println!("DNS failures:        {}", summary.dns_failures);
+            println!("SSL errors:          {}", summary.ssl_errors);
+            println!("Connection refused:  {}", summary.connection_refused);
+            println!("Timeouts:            {}", summary.timeouts);
+            println!("Parking domains:     {}", summary.parking);
+            println!("HTTP errors:         {}", summary.http_errors);
+            println!("\nReachable domains written to: {}", output.display());
+            if let Some(ref fp) = filtered {
+                println!("Filtered domains written to: {}", fp.display());
+            }
         }
 
         Commands::ImportJsonl { input, db, source } => {

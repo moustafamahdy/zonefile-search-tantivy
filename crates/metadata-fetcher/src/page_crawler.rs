@@ -164,7 +164,7 @@ fn build_page_client(config: &FetcherConfig) -> anyhow::Result<Client> {
         .gzip(true)
         .redirect(reqwest::redirect::Policy::limited(3))
         .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0 (compatible; MetadataBot/1.0)")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .build()?;
     Ok(client)
 }
