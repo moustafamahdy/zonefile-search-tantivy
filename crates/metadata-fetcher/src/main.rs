@@ -118,6 +118,10 @@ enum Commands {
         #[arg(long)]
         db: Option<PathBuf>,
 
+        /// Path to pre-exported domain list (one domain per line)
+        #[arg(long)]
+        domains_file: Option<PathBuf>,
+
         /// Common Crawl index to query (e.g., CC-MAIN-2025-08)
         #[arg(long, alias = "cc-index")]
         index: Option<String>,
@@ -292,6 +296,7 @@ async fn main() -> Result<()> {
 
         Commands::EnrichCc {
             db,
+            domains_file,
             index,
             concurrency,
             cdx_delay_ms,
@@ -317,7 +322,11 @@ async fn main() -> Result<()> {
             }
 
             let store = MetadataStore::open(&config.db_path).await?;
-            commoncrawl::run_commoncrawl_enrichment(&config, store).await?;
+            commoncrawl::run_commoncrawl_enrichment(
+                &config,
+                store,
+                domains_file.as_deref(),
+            ).await?;
         }
 
         Commands::ExportBlocked { db, output } => {

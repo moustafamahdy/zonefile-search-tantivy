@@ -274,13 +274,14 @@ fn parse_html_metadata(domain: &str, html: &str) -> PageMetadataResult {
 
 /// Run the Common Crawl enrichment pipeline.
 ///
-/// 1. Export failed domains from SQLite
+/// 1. Load domains from file or export from SQLite
 /// 2. For each, query CDX API for a cached copy
 /// 3. Fetch WARC record from S3, decompress, parse HTML
 /// 4. Upsert metadata into SQLite
 pub async fn run_commoncrawl_enrichment(
     config: &FetcherConfig,
     store: MetadataStore,
+    domains_file: Option<&std::path::Path>,
 ) -> Result<()> {
     info!(
         cc_index = %config.cc_index,
@@ -290,10 +291,15 @@ pub async fn run_commoncrawl_enrichment(
         "Starting Common Crawl enrichment"
     );
 
-    // 1. Export failed domains
-    let failed_domains = store.export_failed_domains(config.cc_http_only).await?;
+    // 1. Load domains from file or export from SQLite
+    let failed_domains = if let Some(file_path) = domains_file {
+        info!(path = ?file_path, "Loading domains from file");
+        load_domains_from_file(file_path).await?
+    } else {
+        store.export_failed_domains(config.cc_http_only).await?
+    };
     let total = failed_domains.len();
-    info!(total, "Failed domains exported for CC enrichment");
+    info!(total, "Domains loaded for CC enrichment");
 
     if total == 0 {
         info!("No failed domains to enrich");
@@ -475,4 +481,23 @@ pub async fn import_jsonl(
 
     info!(total, errors, "JSONL import complete");
     Ok(())
+}
+
+/// Load domain list from a text file (one domain per line).
+async fn load_domains_from_file(path: &std::path::Path) -> Result<Vec<String>> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let file = tokio::fs::File::open(path).await?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut domains = Vec::new();
+
+    while let Some(line) = lines.next_line().await? {
+        let trimmed = line.trim().to_string();
+        if !trimmed.is_empty() {
+            domains.push(trimmed);
+        }
+    }
+
+    Ok(domains)
 }
