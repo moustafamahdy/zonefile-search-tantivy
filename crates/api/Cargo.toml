@@ -22,3 +22,5 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+rusqlite = { workspace = true }
+dotenvy = { workspace = true }

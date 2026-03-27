@@ -12,10 +12,12 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod cache;
+mod precheck_db;
 mod routes;
 mod search;
 
 use cache::Cache;
+use precheck_db::PrecheckDb;
 
 /// Shared application state
 pub struct AppState {
@@ -23,6 +25,7 @@ pub struct AppState {
     pub schema: DomainSchema,
     pub index: Index,
     pub cache: Option<Cache>,
+    pub precheck_db: Option<PrecheckDb>,
 }
 
 #[tokio::main]
@@ -70,11 +73,28 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Open precheck SQLite DB (optional — read-only)
+    let precheck_db = {
+        let db_path = std::env::var("METADATA_DB_PATH")
+            .unwrap_or_else(|_| "./data/metadata.db".to_string());
+        match PrecheckDb::open(&db_path) {
+            Ok(db) => {
+                info!(path = db_path, "Precheck DB loaded");
+                Some(db)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = db_path, "Precheck DB unavailable, is_reachable will be null");
+                None
+            }
+        }
+    };
+
     let state = Arc::new(AppState {
         config: config.clone(),
         schema,
         index,
         cache,
+        precheck_db,
     });
 
     // Build router

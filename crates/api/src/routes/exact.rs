@@ -62,6 +62,10 @@ pub struct DomainResult {
     pub snippet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+
+    // Precheck reachability
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_reachable: Option<bool>,
 }
 
 // Bulk exact lookup types
@@ -113,7 +117,13 @@ pub async fn exact_lookup(
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Doc error: {}", e))
         })?;
 
-        let result = extract_domain_result(&state.schema, &doc);
+        let mut result = extract_domain_result(&state.schema, &doc);
+
+        // Enrich with is_reachable
+        if let Some(ref precheck_db) = state.precheck_db {
+            let lookup = precheck_db.batch_lookup(&[result.domain.as_str()]);
+            result.is_reachable = lookup.get(&result.domain).copied();
+        }
 
         Ok(Json(ExactResponse {
             found: true,
@@ -291,5 +301,6 @@ pub fn extract_domain_result(
         og_image,
         snippet,
         language,
+        is_reachable: None, // Populated after search from precheck DB
     }
 }

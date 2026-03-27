@@ -108,7 +108,10 @@ pub async fn search(
     }
 
     // Execute search
-    let response = execute_search(&state, &params).await?;
+    let mut response = execute_search(&state, &params).await?;
+
+    // Enrich with is_reachable from precheck DB
+    enrich_reachable(&state, &mut response);
 
     // Store in cache
     if let Some(cache) = &state.cache {
@@ -749,4 +752,25 @@ pub async fn bulk_search(
         results,
         total_time_ms,
     }))
+}
+
+/// Enrich search results with is_reachable from the precheck DB.
+fn enrich_reachable(state: &AppState, response: &mut SearchResponse) {
+    if let Some(ref precheck_db) = state.precheck_db {
+        let domains: Vec<&str> = response
+            .results
+            .iter()
+            .map(|r| r.domain.domain.as_str())
+            .collect();
+
+        if domains.is_empty() {
+            return;
+        }
+
+        let lookup = precheck_db.batch_lookup(&domains);
+
+        for result in &mut response.results {
+            result.domain.is_reachable = lookup.get(&result.domain.domain).copied();
+        }
+    }
 }
