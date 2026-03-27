@@ -180,6 +180,14 @@ enum Commands {
         /// Per-request timeout in seconds
         #[arg(long, default_value = "5")]
         timeout: u64,
+
+        /// Auto-import results into the precheck DB after completion
+        #[arg(long)]
+        auto_import: bool,
+
+        /// Path to SQLite results database (required for --auto-import)
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
 
     /// Import precheck results (reachable + filtered domains) into the database
@@ -405,6 +413,8 @@ async fn main() -> Result<()> {
             filtered,
             concurrency,
             timeout,
+            auto_import,
+            db,
         } => {
             let summary = precheck::run_precheck(
                 &input,
@@ -427,6 +437,17 @@ async fn main() -> Result<()> {
             println!("\nReachable domains written to: {}", output.display());
             if let Some(ref fp) = filtered {
                 println!("Filtered domains written to: {}", fp.display());
+            }
+
+            // Auto-import results into the precheck DB
+            if auto_import {
+                if let Some(db) = db {
+                    config.db_path = db;
+                }
+                info!("Auto-importing precheck results into DB");
+                let store = MetadataStore::open(&config.db_path).await?;
+                import_precheck_files(&store, &output, filtered.as_deref()).await?;
+                println!("Precheck results imported into DB");
             }
         }
 
