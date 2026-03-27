@@ -104,6 +104,10 @@ enum Commands {
         /// Maximum concurrent requests
         #[arg(long)]
         concurrency: Option<usize>,
+
+        /// Only fetch domains marked reachable in the precheck table
+        #[arg(long)]
+        reachable_only: bool,
     },
 
     /// Show page metadata crawl statistics
@@ -176,6 +180,28 @@ enum Commands {
         /// Per-request timeout in seconds
         #[arg(long, default_value = "5")]
         timeout: u64,
+    },
+
+    /// Import precheck results (reachable + filtered domains) into the database
+    ImportPrecheck {
+        /// Path to reachable domains file (one domain per line)
+        #[arg(long)]
+        reachable: PathBuf,
+
+        /// Path to filtered domains file (domain\treason per line)
+        #[arg(long)]
+        filtered: Option<PathBuf>,
+
+        /// Path to SQLite results database
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+
+    /// Show precheck statistics
+    PrecheckStats {
+        /// Path to SQLite results database
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
 
     /// Import metadata from a JSONL file into the SQLite database
@@ -295,6 +321,7 @@ async fn main() -> Result<()> {
             db,
             resume,
             concurrency,
+            reachable_only,
         } => {
             if let Some(db) = db {
                 config.db_path = db;
@@ -305,7 +332,14 @@ async fn main() -> Result<()> {
 
             let store = MetadataStore::open(&config.db_path).await?;
 
-            let file_path = if let Some(ref file) = domains_file {
+            let file_path = if reachable_only && domains_file.is_none() {
+                // Export reachable domains from precheck table to a temp file
+                info!("Exporting reachable domains from precheck table");
+                let export_path = config.db_path.with_extension("reachable.txt");
+                let count = export_reachable_domains(&store, &export_path).await?;
+                info!(count, path = ?export_path, "Reachable domains exported");
+                export_path
+            } else if let Some(ref file) = domains_file {
                 file.clone()
             } else {
                 info!("Exporting domains from Tantivy index");
@@ -396,6 +430,37 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::ImportPrecheck {
+            reachable,
+            filtered,
+            db,
+        } => {
+            if let Some(db) = db {
+                config.db_path = db;
+            }
+            let store = MetadataStore::open(&config.db_path).await?;
+            import_precheck_files(&store, &reachable, filtered.as_deref()).await?;
+        }
+
+        Commands::PrecheckStats { db } => {
+            if let Some(db) = db {
+                config.db_path = db;
+            }
+            let store = MetadataStore::open(&config.db_path).await?;
+            let stats = store.read_precheck_stats().await?;
+
+            println!("=== Pre-Check Database Statistics ===");
+            println!("Total checked:   {}", stats.total);
+            println!("Reachable:       {} ({:.1}%)", stats.reachable, pct(stats.reachable, stats.total));
+            println!("Filtered:        {} ({:.1}%)", stats.filtered, pct(stats.filtered, stats.total));
+            if !stats.reason_counts.is_empty() {
+                println!("\n=== Filter Reasons ===");
+                for (reason, count) in &stats.reason_counts {
+                    println!("  {:<25} {}", reason, count);
+                }
+            }
+        }
+
         Commands::ImportJsonl { input, db, source } => {
             if let Some(db) = db {
                 config.db_path = db;
@@ -472,4 +537,111 @@ async fn load_domains_from_file(path: &PathBuf) -> Result<Vec<String>> {
     }
 
     Ok(domains)
+}
+
+/// Import precheck results from reachable + filtered files into the DB.
+async fn import_precheck_files(
+    store: &MetadataStore,
+    reachable_path: &std::path::Path,
+    filtered_path: Option<&std::path::Path>,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let batch_size = 50_000;
+    let mut total: u64 = 0;
+
+    // Import reachable domains
+    info!(path = ?reachable_path, "Importing reachable domains");
+    let file = tokio::fs::File::open(reachable_path).await?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut batch: Vec<(String, bool, Option<String>)> = Vec::with_capacity(batch_size);
+
+    loop {
+        match lines.next_line().await? {
+            Some(line) => {
+                let trimmed = line.trim().to_string();
+                if !trimmed.is_empty() {
+                    batch.push((trimmed, true, None));
+                }
+            }
+            None => break,
+        }
+
+        if batch.len() >= batch_size {
+            total += batch.len() as u64;
+            let b = std::mem::replace(&mut batch, Vec::with_capacity(batch_size));
+            store.upsert_precheck_batch(b, now).await?;
+            if total % 500_000 == 0 {
+                info!(total, "Reachable domains imported");
+            }
+        }
+    }
+    if !batch.is_empty() {
+        total += batch.len() as u64;
+        store.upsert_precheck_batch(batch, now).await?;
+    }
+    info!(total, "Reachable domains import complete");
+
+    // Import filtered domains
+    if let Some(filtered_path) = filtered_path {
+        info!(path = ?filtered_path, "Importing filtered domains");
+        let file = tokio::fs::File::open(filtered_path).await?;
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+        let mut batch: Vec<(String, bool, Option<String>)> = Vec::with_capacity(batch_size);
+        let mut filtered_total: u64 = 0;
+
+        loop {
+            match lines.next_line().await? {
+                Some(line) => {
+                    let trimmed = line.trim().to_string();
+                    if !trimmed.is_empty() {
+                        // Format: domain\treason
+                        let mut parts = trimmed.splitn(2, '\t');
+                        let domain = parts.next().unwrap_or("").to_string();
+                        let reason = parts.next().map(|s| s.to_string());
+                        if !domain.is_empty() {
+                            batch.push((domain, false, reason));
+                        }
+                    }
+                }
+                None => break,
+            }
+
+            if batch.len() >= batch_size {
+                filtered_total += batch.len() as u64;
+                let b = std::mem::replace(&mut batch, Vec::with_capacity(batch_size));
+                store.upsert_precheck_batch(b, now).await?;
+                if filtered_total % 500_000 == 0 {
+                    info!(filtered_total, "Filtered domains imported");
+                }
+            }
+        }
+        if !batch.is_empty() {
+            filtered_total += batch.len() as u64;
+            store.upsert_precheck_batch(batch, now).await?;
+        }
+        info!(filtered_total, "Filtered domains import complete");
+        total += filtered_total;
+    }
+
+    info!(total, "Precheck import complete");
+    Ok(())
+}
+
+/// Export reachable domains from the precheck table to a file.
+/// Uses sync SQLite to stream rows without loading all 121M into memory.
+async fn export_reachable_domains(
+    store: &MetadataStore,
+    output: &std::path::Path,
+) -> Result<u64> {
+    let output = output.to_path_buf();
+    let count = store.export_reachable_to_file(&output).await?;
+    Ok(count)
 }

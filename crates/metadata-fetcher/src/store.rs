@@ -118,6 +118,15 @@ impl MetadataStore {
                 );
                 CREATE INDEX IF NOT EXISTS idx_page_fetched ON page_metadata(fetched_at);
                 CREATE INDEX IF NOT EXISTS idx_page_source ON page_metadata(source);
+
+                CREATE TABLE IF NOT EXISTS domain_precheck (
+                    domain         TEXT PRIMARY KEY,
+                    reachable      INTEGER NOT NULL DEFAULT 0,
+                    head_status    INTEGER,
+                    filter_reason  TEXT,
+                    checked_at     INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_precheck_reachable ON domain_precheck(reachable);
             ",
             )?)
         })
@@ -470,6 +479,125 @@ impl MetadataStore {
             .await?;
         Ok(count as u64)
     }
+
+    // --- Precheck methods ---
+
+    /// Bulk insert reachable domains into domain_precheck table.
+    pub async fn upsert_precheck_batch(&self, domains: Vec<(String, bool, Option<String>)>, checked_at: i64) -> Result<()> {
+        self.conn
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "INSERT OR REPLACE INTO domain_precheck (domain, reachable, filter_reason, checked_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )?;
+                    for (domain, reachable, reason) in &domains {
+                        stmt.execute(rusqlite::params![
+                            domain,
+                            *reachable as i64,
+                            reason,
+                            checked_at,
+                        ])?;
+                    }
+                }
+                Ok(tx.commit()?)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Check if a domain is marked as reachable in precheck table.
+    pub async fn is_reachable(&self, domain: &str) -> Result<Option<bool>> {
+        let domain = domain.to_string();
+        let result = self
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT reachable FROM domain_precheck WHERE domain = ?1",
+                    rusqlite::params![domain],
+                    |row| row.get::<_, i64>(0),
+                ).ok().map(|v| v == 1))
+            })
+            .await?;
+        Ok(result)
+    }
+
+    /// Export reachable domains to a file (streaming, no memory bloat).
+    pub async fn export_reachable_to_file(&self, output: &std::path::Path) -> Result<u64> {
+        let output = output.to_path_buf();
+        let count = self
+            .conn
+            .call(move |conn| {
+                use std::io::Write;
+                let mut file = std::io::BufWriter::new(
+                    std::fs::File::create(&output)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                );
+                let mut stmt =
+                    conn.prepare("SELECT domain FROM domain_precheck WHERE reachable = 1")?;
+                let mut rows = stmt.query([])?;
+                let mut count: u64 = 0;
+                while let Some(row) = rows.next()? {
+                    let domain: String = row.get(0)?;
+                    file.write_all(domain.as_bytes())
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    file.write_all(b"\n")
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    count += 1;
+                }
+                file.flush()
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                Ok(count)
+            })
+            .await?;
+        Ok(count)
+    }
+
+    /// Get precheck statistics.
+    pub async fn read_precheck_stats(&self) -> Result<PreCheckStats> {
+        let stats = self
+            .conn
+            .call(|conn| {
+                let total: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM domain_precheck", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let reachable: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM domain_precheck WHERE reachable = 1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let filtered: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM domain_precheck WHERE reachable = 0",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+
+                let mut reason_counts: Vec<(String, i64)> = Vec::new();
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT filter_reason, COUNT(*) as cnt FROM domain_precheck WHERE reachable = 0 AND filter_reason IS NOT NULL GROUP BY filter_reason ORDER BY cnt DESC LIMIT 20",
+                ) {
+                    if let Ok(rows) = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
+                        for row in rows.flatten() {
+                            reason_counts.push(row);
+                        }
+                    }
+                }
+
+                Ok(PreCheckStats {
+                    total,
+                    reachable,
+                    filtered,
+                    reason_counts,
+                })
+            })
+            .await?;
+        Ok(stats)
+    }
 }
 
 #[derive(Debug)]
@@ -494,4 +622,12 @@ pub struct CrawlStats {
     pub crawl_done: i64,
     pub last_updated: i64,
     pub cms_counts: Vec<(String, i64)>,
+}
+
+#[derive(Debug)]
+pub struct PreCheckStats {
+    pub total: i64,
+    pub reachable: i64,
+    pub filtered: i64,
+    pub reason_counts: Vec<(String, i64)>,
 }
