@@ -21,15 +21,21 @@ impl PrecheckDb {
 
     /// Batch lookup reachability for a list of domains.
     /// Returns a map of domain -> is_reachable.
+    /// Domains found in the table are reachable (true).
+    /// Domains NOT in the table are assumed unreachable (false).
     pub fn batch_lookup(&self, domains: &[&str]) -> HashMap<String, bool> {
         let mut result = HashMap::new();
+
+        // Default all to false (unreachable)
+        for domain in domains {
+            result.insert(domain.to_string(), false);
+        }
+
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(_) => return result,
         };
 
-        // Use individual lookups — for 50 domains this is fast enough
-        // and avoids SQL injection concerns with dynamic IN clauses.
         let mut stmt = match conn.prepare_cached(
             "SELECT reachable FROM domain_precheck WHERE domain = ?1",
         ) {

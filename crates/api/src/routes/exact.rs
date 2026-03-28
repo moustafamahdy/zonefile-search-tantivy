@@ -63,8 +63,7 @@ pub struct DomainResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 
-    // Precheck reachability
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Precheck reachability (true = alive, false = unreachable/not checked)
     pub is_reachable: Option<bool>,
 }
 
