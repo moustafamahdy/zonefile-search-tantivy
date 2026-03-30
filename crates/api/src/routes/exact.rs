@@ -57,8 +57,6 @@ pub struct DomainResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta_description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub og_image: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
@@ -277,7 +275,6 @@ pub fn extract_domain_result(
 
     let page_title = extract_optional(schema.page_title);
     let meta_description = extract_optional(schema.meta_description);
-    let og_image = extract_optional(schema.og_image);
     let snippet = extract_optional(schema.snippet);
     let language = extract_optional(schema.language);
 
@@ -297,7 +294,6 @@ pub fn extract_domain_result(
         seo_rank,
         page_title,
         meta_description,
-        og_image,
         snippet,
         language,
         is_reachable: None, // Populated after search from precheck DB

@@ -37,7 +37,6 @@ pub async fn import_metadata(
 
     let page_title_field = ds.page_title.unwrap();
     let meta_desc_field = ds.meta_description.unwrap();
-    let og_image_field = ds.og_image.unwrap();
     let snippet_field = ds.snippet.unwrap();
     let language_field = ds.language.unwrap();
 
@@ -93,9 +92,6 @@ pub async fn import_metadata(
             }
             if let Some(ref desc) = meta.meta_description {
                 new_doc.add_text(meta_desc_field, desc);
-            }
-            if let Some(ref img) = meta.og_image {
-                new_doc.add_text(og_image_field, img);
             }
             if let Some(ref snip) = meta.snippet {
                 new_doc.add_text(snippet_field, snip);

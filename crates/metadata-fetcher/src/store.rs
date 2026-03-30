@@ -10,7 +10,6 @@ use tracing::info;
 pub struct PageMetaRow {
     pub page_title: Option<String>,
     pub meta_description: Option<String>,
-    pub og_image: Option<String>,
     pub snippet: Option<String>,
     pub language: Option<String>,
 }
@@ -27,7 +26,7 @@ pub fn load_domains_with_page_metadata(
     conn.execute_batch("PRAGMA cache_size = -65536;")?;
 
     let mut stmt = conn.prepare(
-        "SELECT domain, page_title, meta_description, og_image, snippet, language
+        "SELECT domain, page_title, meta_description, snippet, language
          FROM page_metadata
          WHERE page_title IS NOT NULL",
     )?;
@@ -38,9 +37,8 @@ pub fn load_domains_with_page_metadata(
             PageMetaRow {
                 page_title: row.get(1)?,
                 meta_description: row.get(2)?,
-                og_image: row.get(3)?,
-                snippet: row.get(4)?,
-                language: row.get(5)?,
+                snippet: row.get(3)?,
+                language: row.get(4)?,
             },
         ))
     })?;
