@@ -288,18 +288,19 @@ impl MetadataStore {
     // --- Page metadata methods ---
 
     /// Check if a domain has a usable page metadata result.
-    /// Returns true only if the domain has a successful result (has page_title)
-    /// or a definitive HTTP error (404, 410, 451).
-    /// Domains with "connection failed" are NOT considered done — they should be retried
-    /// (e.g., after switching User-Agent or from a different network).
+    /// Returns true if the domain has any row in page_metadata — including
+    /// successful results (page_title), definitive errors (404/410/451),
+    /// and connection/timeout failures from a previous run.
+    /// Connection failures are considered "done" because retrying them with
+    /// the same User-Agent and concurrency rarely changes the outcome; the
+    /// monthly precheck is the proper place to re-evaluate reachability.
     pub async fn is_page_done(&self, domain: &str) -> Result<bool> {
         let domain = domain.to_string();
         let count: i64 = self
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM page_metadata WHERE domain = ?1
-                     AND (page_title IS NOT NULL OR error IN ('http 404', 'http 410', 'http 451'))",
+                    "SELECT COUNT(*) FROM page_metadata WHERE domain = ?1",
                     rusqlite::params![domain],
                     |row| row.get(0),
                 )?)
