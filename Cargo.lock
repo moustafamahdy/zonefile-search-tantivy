@@ -98,7 +98,9 @@ dependencies = [
  "anyhow",
  "axum",
  "domain-core",
+ "dotenvy",
  "redis",
+ "rusqlite",
  "serde",
  "serde_json",
  "tantivy",
@@ -1298,14 +1300,17 @@ dependencies = [
  "domain-core",
  "futures",
  "indicatif",
+ "reqwest",
  "serde",
  "serde_json",
  "tantivy",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
  "word-client",
  "zonefile-client",
 ]
@@ -3940,6 +3945,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

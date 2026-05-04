@@ -5,8 +5,13 @@ use domain_core::{
     DomainSchema,
 };
 use futures::StreamExt;
+use serde::Serialize;
 use std::path::Path;
-use tantivy::{Index, Term};
+use tantivy::collector::TopDocs;
+use tantivy::query::TermQuery;
+use tantivy::schema::IndexRecordOption;
+use tantivy::schema::Value;
+use tantivy::{Index, Searcher, Term};
 use tracing::{debug, info, warn};
 use word_client::WordClient;
 use zonefile_client::{
@@ -14,12 +19,26 @@ use zonefile_client::{
     ZonefileType,
 };
 
-/// Run daily sync with download from API
+#[derive(Debug, Serialize)]
+struct NsChange {
+    domain: String,
+    old_ns: String,
+    new_ns: String,
+    timestamp: String,
+}
+
+/// Run daily sync with download from API.
+///
+/// `prefer_detailed` is the operator preference (CLI flag / `DETAILED_MODE`
+/// env var). The actual mode is resolved against the plan via
+/// [`crate::mode::resolve_mode_via_downloader`] before any download starts —
+/// see the dual-mode design doc for the full decision matrix.
 pub async fn run_with_download(
     config: &Config,
     index_path: &Path,
-    detailed: bool,
+    prefer_detailed: bool,
     no_word_segment: bool,
+    notify_ns_changes: bool,
 ) -> Result<()> {
     let downloader = ZonefileDownloader::new(
         &config.zonefile_api_url,
@@ -27,7 +46,10 @@ pub async fn run_with_download(
         std::env::temp_dir().join("zonefile-indexer"),
     )?;
 
-    // Download adds file (detailed or plain)
+    // Resolve mode against the live plan. May log [MODE] info/warn lines.
+    let detailed = crate::mode::resolve_mode_via_downloader(prefer_detailed, &downloader).await?;
+
+    // Download adds file (detailed or plain) using the resolved mode.
     let adds_type = if detailed {
         ZonefileType::DetailedDailyUpdate
     } else {
@@ -41,7 +63,16 @@ pub async fn run_with_download(
     info!("Downloading daily remove file...");
     let removes_path = downloader.download(ZonefileType::DailyRemove).await?;
 
-    run(config, Some(adds_path), Some(removes_path), index_path, detailed, no_word_segment).await
+    run(
+        config,
+        Some(adds_path),
+        Some(removes_path),
+        index_path,
+        detailed,
+        no_word_segment,
+        notify_ns_changes,
+    )
+    .await
 }
 
 /// Run daily sync from local files
@@ -52,6 +83,7 @@ pub async fn run(
     index_path: &Path,
     detailed: bool,
     no_word_segment: bool,
+    notify_ns_changes: bool,
 ) -> Result<()> {
     info!("Starting daily sync");
 
@@ -79,6 +111,18 @@ pub async fn run(
         )?)
     };
 
+    // Prepare searcher for NS change detection (before any writes).
+    // Note: `detailed` here is the *resolved* mode (from `resolve_mode`), not the
+    // raw operator preference — so on standard plan this gate is always false
+    // and NS-change detection silently no-ops, which is the intended dormant
+    // behavior described in the dual-mode design doc §6.4.
+    let searcher = if notify_ns_changes && detailed {
+        info!("NS change detection enabled");
+        Some(reader.searcher())
+    } else {
+        None
+    };
+
     let mut total_deleted: u64 = 0;
     let mut total_added: u64 = 0;
 
@@ -93,6 +137,7 @@ pub async fn run(
     }
 
     // Process additions (detailed or plain)
+    let mut ns_changes: Vec<NsChange> = Vec::new();
     if let Some(adds_path) = adds_path {
         let adds_path = adds_path.as_ref();
         if adds_path.exists() {
@@ -104,6 +149,8 @@ pub async fn run(
                 &mut writer,
                 adds_path,
                 detailed,
+                searcher.as_ref(),
+                &mut ns_changes,
             )
             .await?;
 
@@ -128,7 +175,78 @@ pub async fn run(
         "Daily sync complete"
     );
 
+    // POST NS changes to namemaxi-sync if any detected
+    if !ns_changes.is_empty() {
+        info!(count = ns_changes.len(), "NS changes detected, posting...");
+        post_ns_changes(&ns_changes).await;
+    }
+
     Ok(())
+}
+
+/// Look up the current dns_servers for a domain in the existing index
+fn lookup_current_ns(
+    searcher: &Searcher,
+    schema: &DomainSchema,
+    domain_exact: &str,
+) -> Option<String> {
+    let term = Term::from_field_text(schema.domain_exact, domain_exact);
+    let query = TermQuery::new(term, IndexRecordOption::Basic);
+
+    let top_docs = searcher.search(&query, &TopDocs::with_limit(1)).ok()?;
+    let (_, doc_address) = top_docs.into_iter().next()?;
+    let doc: tantivy::TantivyDocument = searcher.doc(doc_address).ok()?;
+
+    let dns_field = schema.dns_servers?;
+    doc.get_first(dns_field)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+}
+
+/// POST NS changes to the namemaxi-sync endpoint
+async fn post_ns_changes(changes: &[NsChange]) {
+    let endpoint =
+        std::env::var("NS_CHANGE_ENDPOINT").unwrap_or_default();
+    let secret = std::env::var("NS_CHANGE_SECRET").unwrap_or_default();
+
+    if endpoint.is_empty() {
+        info!(
+            count = changes.len(),
+            "NS_CHANGE_ENDPOINT not set, skipping POST (changes detected but not sent)"
+        );
+        return;
+    }
+
+    let client = reqwest::Client::new();
+
+    // Send in batches of 500
+    for (i, chunk) in changes.chunks(500).enumerate() {
+        let body = serde_json::json!({ "changes": chunk });
+
+        match client
+            .post(&endpoint)
+            .header("x-ns-sync-secret", &secret)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    info!(batch = i + 1, count = chunk.len(), "NS changes posted successfully");
+                } else {
+                    warn!(
+                        batch = i + 1,
+                        status = %resp.status(),
+                        "NS change POST returned non-success status"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(batch = i + 1, error = %e, "Failed to POST NS changes (continuing)");
+            }
+        }
+    }
 }
 
 async fn process_removals(
@@ -177,10 +295,19 @@ async fn process_additions(
     writer: &mut tantivy::IndexWriter,
     adds_path: &Path,
     detailed: bool,
+    searcher: Option<&Searcher>,
+    ns_changes: &mut Vec<NsChange>,
 ) -> Result<u64> {
     let mut progress = IndexProgress::spinner();
     let mut added: u64 = 0;
     let mut filtered: u64 = 0;
+    let timestamp = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        format!("{}", now)
+    };
 
     if detailed {
         // DETAILED MODE: parse CSV and attach metadata
@@ -194,6 +321,8 @@ async fn process_additions(
 
             let mut valid_domains: Vec<domain_core::NormalizedDomain> = Vec::new();
             let mut labels_to_segment: Vec<String> = Vec::new();
+            // Track records alongside valid_domains for NS comparison
+            let mut valid_records: Vec<&zonefile_client::parser::DetailedLine> = Vec::new();
 
             for record in &batch {
                 let domain = Domain::new(&record.domain);
@@ -217,6 +346,7 @@ async fn process_additions(
 
                         labels_to_segment.push(normalized.label.clone());
                         valid_domains.push(normalized.with_detailed(detail));
+                        valid_records.push(record);
                     }
                     Err(e) => {
                         debug!(domain = &record.domain, error = %e, "Failed to normalize");
@@ -249,7 +379,26 @@ async fn process_additions(
                 }
             }
 
-            for normalized in &valid_domains {
+            for (idx, normalized) in valid_domains.iter().enumerate() {
+                // NS change detection: compare old vs new before overwriting
+                if let Some(ref s) = searcher {
+                    let new_ns = &valid_records[idx].dns_servers;
+                    if !new_ns.is_empty() {
+                        if let Some(old_ns) =
+                            lookup_current_ns(s, schema, &normalized.domain_exact)
+                        {
+                            if !old_ns.is_empty() && old_ns != *new_ns {
+                                ns_changes.push(NsChange {
+                                    domain: normalized.domain_exact.clone(),
+                                    old_ns,
+                                    new_ns: new_ns.clone(),
+                                    timestamp: timestamp.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 let term =
                     Term::from_field_text(schema.domain_exact, &normalized.domain_exact);
                 writer.delete_term(term);

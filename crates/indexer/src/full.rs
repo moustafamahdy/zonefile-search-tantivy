@@ -14,13 +14,17 @@ use zonefile_client::{
     ZonefileType,
 };
 
-/// Run full indexing with download from API
+/// Run full indexing with download from API.
+///
+/// `prefer_detailed` is the operator preference (CLI flag / `DETAILED_MODE`
+/// env var). The actual mode is resolved against the plan via
+/// [`crate::mode::resolve_mode_via_downloader`] before download begins.
 pub async fn run_with_download(
     config: &Config,
     output_path: &Path,
     heap_size: usize,
     commit_interval: usize,
-    detailed: bool,
+    prefer_detailed: bool,
     no_word_segment: bool,
 ) -> Result<()> {
     let downloader = ZonefileDownloader::new(
@@ -28,6 +32,9 @@ pub async fn run_with_download(
         &config.zonefile_token,
         std::env::temp_dir().join("zonefile-indexer"),
     )?;
+
+    // Resolve mode against the live plan. May log [MODE] info/warn lines.
+    let detailed = crate::mode::resolve_mode_via_downloader(prefer_detailed, &downloader).await?;
 
     let zonefile_type = if detailed {
         ZonefileType::DetailedFull
