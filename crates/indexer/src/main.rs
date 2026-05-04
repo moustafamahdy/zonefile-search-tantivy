@@ -7,6 +7,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod daily;
 mod full;
+mod mode;
 mod progress;
 
 #[derive(Parser)]
@@ -41,7 +42,10 @@ enum Commands {
         #[arg(long, default_value = "1000000")]
         commit_interval: usize,
 
-        /// Use detailed zonefile format (CSV with IP, country, web server, etc.)
+        /// Prefer the detailed zonefile format (CSV with IP, country, web server, etc.).
+        /// On `--download` runs, the indexer probes the detailed endpoint first;
+        /// if the plan rejects it (HTTP 403/404) the indexer falls back to plain
+        /// mode with a WARN log. Set `DETAILED_MODE=false` in .env to skip the probe.
         #[arg(long)]
         detailed: bool,
 
@@ -75,6 +79,10 @@ enum Commands {
         /// Skip word segmentation API calls (trigram indexing still works)
         #[arg(long)]
         no_word_segment: bool,
+
+        /// Detect NS changes and POST to namemaxi-sync endpoint
+        #[arg(long)]
+        notify_ns_changes: bool,
     },
 
     /// Show index statistics
@@ -148,16 +156,17 @@ async fn main() -> Result<()> {
             index,
             detailed,
             no_word_segment,
+            notify_ns_changes,
         } => {
             let index_path = index.unwrap_or_else(|| config.index_path.clone());
 
             if download {
                 let mode = if detailed { "detailed" } else { "plain" };
-                info!(mode = mode, no_word_segment = no_word_segment, "Downloading daily updates from API...");
-                daily::run_with_download(&config, &index_path, detailed, no_word_segment).await?;
+                info!(mode = mode, no_word_segment = no_word_segment, notify_ns_changes = notify_ns_changes, "Downloading daily updates from API...");
+                daily::run_with_download(&config, &index_path, detailed, no_word_segment, notify_ns_changes).await?;
             } else {
                 info!(index = ?index_path, detailed = detailed, "Applying daily updates");
-                daily::run(&config, adds, removes, &index_path, detailed, no_word_segment).await?;
+                daily::run(&config, adds, removes, &index_path, detailed, no_word_segment, notify_ns_changes).await?;
             }
         }
 

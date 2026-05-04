@@ -55,6 +55,20 @@ impl ZonefileType {
     }
 }
 
+/// Result of probing the detailed-zonefile endpoint to see whether the
+/// configured plan supports detailed downloads.
+///
+/// `Available` means the operator can run in detailed mode.
+/// `PlanRejected` means the plan does not support detailed downloads —
+/// callers should fall back to plain mode rather than treat this as an error.
+/// Anything else (5xx, timeout, network failure) is returned as `Err` so
+/// transient outages cannot silently downgrade the indexer to plain mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeResult {
+    Available,
+    PlanRejected { status: u16 },
+}
+
 /// Client for downloading zonefiles from domains-monitor.com
 pub struct ZonefileDownloader {
     client: Client,
@@ -262,6 +276,50 @@ impl ZonefileDownloader {
         Ok(())
     }
 
+    /// Probe the detailed-zonefile endpoint to determine whether the plan
+    /// supports detailed downloads.
+    ///
+    /// Sends a `Range: bytes=0-0` GET against `get-detailed/full/list/zip`
+    /// with a short timeout. The response status is interpreted as:
+    ///
+    /// - `200` / `206` → [`ProbeResult::Available`]
+    /// - `403` / `404` → [`ProbeResult::PlanRejected`]
+    /// - any other status → `Err(Error::DownloadFailed)`
+    /// - timeout / network failure → `Err(Error::Request)`
+    ///
+    /// The narrow set of statuses that map to `PlanRejected` is intentional —
+    /// only failures that are unambiguously caused by the plan tier should
+    /// trigger fallback. Transient errors must propagate so the cron fails
+    /// noisily instead of silently downgrading data quality.
+    pub async fn probe_detailed_available(&self) -> Result<ProbeResult> {
+        let url = format!(
+            "{}/{}/{}",
+            self.base_url,
+            self.token,
+            ZonefileType::DetailedFull.url_path()
+        );
+
+        debug!("Probing detailed endpoint");
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Range", "bytes=0-0")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        match status {
+            200 | 206 => Ok(ProbeResult::Available),
+            403 | 404 => Ok(ProbeResult::PlanRejected { status }),
+            _ => Err(Error::DownloadFailed {
+                status,
+                message: response.text().await.unwrap_or_default(),
+            }),
+        }
+    }
+
     /// Download directly to memory (for smaller files like daily updates)
     pub async fn download_to_memory(&self, zonefile_type: ZonefileType) -> Result<Vec<u8>> {
         let endpoint = zonefile_type.endpoint();
@@ -323,5 +381,96 @@ mod tests {
         assert!(!ZonefileType::DailyRemove.is_detailed());
         assert!(ZonefileType::DetailedFull.is_detailed());
         assert!(ZonefileType::DetailedDailyUpdate.is_detailed());
+    }
+
+    mod probe {
+        use super::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        async fn make_downloader(server: &MockServer) -> ZonefileDownloader {
+            let dir = tempfile::tempdir().unwrap();
+            ZonefileDownloader::new(server.uri(), "test-token", dir.path()).unwrap()
+        }
+
+        async fn install_probe_response(server: &MockServer, response: ResponseTemplate) {
+            Mock::given(method("GET"))
+                .and(path("/test-token/get-detailed/full/list/zip"))
+                .and(header("Range", "bytes=0-0"))
+                .respond_with(response)
+                .mount(server)
+                .await;
+        }
+
+        #[tokio::test]
+        async fn probe_returns_available_on_200() {
+            let server = MockServer::start().await;
+            install_probe_response(&server, ResponseTemplate::new(200)).await;
+            let downloader = make_downloader(&server).await;
+
+            let result = downloader.probe_detailed_available().await.unwrap();
+            assert_eq!(result, ProbeResult::Available);
+        }
+
+        #[tokio::test]
+        async fn probe_returns_available_on_206() {
+            let server = MockServer::start().await;
+            install_probe_response(&server, ResponseTemplate::new(206)).await;
+            let downloader = make_downloader(&server).await;
+
+            let result = downloader.probe_detailed_available().await.unwrap();
+            assert_eq!(result, ProbeResult::Available);
+        }
+
+        #[tokio::test]
+        async fn probe_returns_plan_rejected_on_403() {
+            let server = MockServer::start().await;
+            install_probe_response(&server, ResponseTemplate::new(403)).await;
+            let downloader = make_downloader(&server).await;
+
+            let result = downloader.probe_detailed_available().await.unwrap();
+            assert_eq!(result, ProbeResult::PlanRejected { status: 403 });
+        }
+
+        #[tokio::test]
+        async fn probe_returns_plan_rejected_on_404() {
+            let server = MockServer::start().await;
+            install_probe_response(&server, ResponseTemplate::new(404)).await;
+            let downloader = make_downloader(&server).await;
+
+            let result = downloader.probe_detailed_available().await.unwrap();
+            assert_eq!(result, ProbeResult::PlanRejected { status: 404 });
+        }
+
+        #[tokio::test]
+        async fn probe_propagates_error_on_500() {
+            let server = MockServer::start().await;
+            install_probe_response(&server, ResponseTemplate::new(500)).await;
+            let downloader = make_downloader(&server).await;
+
+            let err = downloader.probe_detailed_available().await.unwrap_err();
+            match err {
+                Error::DownloadFailed { status, .. } => assert_eq!(status, 500),
+                other => panic!("expected DownloadFailed, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn probe_propagates_error_on_timeout() {
+            let server = MockServer::start().await;
+            // Delay longer than the probe's 10s internal timeout so the request times out.
+            install_probe_response(
+                &server,
+                ResponseTemplate::new(200).set_delay(Duration::from_secs(15)),
+            )
+            .await;
+            let downloader = make_downloader(&server).await;
+
+            let err = downloader.probe_detailed_available().await.unwrap_err();
+            match err {
+                Error::Request(e) => assert!(e.is_timeout(), "expected timeout error, got {e:?}"),
+                other => panic!("expected Request(timeout), got {other:?}"),
+            }
+        }
     }
 }

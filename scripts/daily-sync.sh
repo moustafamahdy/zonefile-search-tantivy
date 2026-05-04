@@ -30,14 +30,31 @@ if [ -f .env ]; then
     source .env
 fi
 
-# Run daily sync
+# Run daily sync.
+#
+# DETAILED_MODE=true  → indexer prefers detailed zonefile (Pro plan).
+#                       If the plan no longer supports detailed (e.g. after a
+#                       downgrade) the indexer probes the endpoint, gets a
+#                       403/404, logs a WARN, and falls back to plain mode so
+#                       the cron still completes. To silence the warning,
+#                       flip this to false.
+# DETAILED_MODE=false → indexer skips the probe and uses plain mode directly.
+#                       This is the right setting on the standard plan.
+#
+# Transient failures (5xx, timeouts) are NOT downgraded — they fail the cron
+# noisily so genuine outages stay visible.
 log "Downloading and applying updates..."
 DETAILED_FLAG=""
 if [ "${DETAILED_MODE:-false}" = "true" ]; then
     DETAILED_FLAG="--detailed"
-    log "Using detailed mode"
+    log "Detailed mode preferred (will probe before download)"
 fi
-./target/release/domain-indexer daily --download ${DETAILED_FLAG} --index "${INDEX_PATH:-./data/index}" >> "$LOG_FILE" 2>&1
+NS_CHANGE_FLAG=""
+if [ "${NOTIFY_NS_CHANGES:-false}" = "true" ]; then
+    NS_CHANGE_FLAG="--notify-ns-changes"
+    log "NS change detection enabled"
+fi
+./target/release/domain-indexer daily --download ${DETAILED_FLAG} ${NS_CHANGE_FLAG} --index "${INDEX_PATH:-./data/index}" >> "$LOG_FILE" 2>&1
 
 # Note: API auto-reloads via Tantivy's file watcher (no restart needed)
 
